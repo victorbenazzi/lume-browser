@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR"><meta charset="utf-8"><title>Lume Workbench</title>
+<style>body{font:16px system-ui;background:#faf9f7;color:#252521;margin:40px;max-width:860px}h1{font-size:30px}section{padding:14px 0;border-bottom:1px solid #ddd}button,input{font:inherit;padding:7px}a{color:#4d5c95}video{width:260px;background:#eee}output{display:block;margin-top:10px}</style>
+<h1>Fluxos cotidianos</h1><p>Dados fictícios em um servidor local de testes.</p>
+<section><h2>Busca e edição</h2><p>LUME-FIND-MARKER primeiro. LUME-FIND-MARKER segundo. LUME-FIND-MARKER terceiro.</p><label>Texto com acentos <input id="draft" placeholder="ação não salva"></label></section>
+<section><h2>Autenticação por popup</h2><button id="oauth">Entrar com conta fictícia</button><output id="auth">Aguardando autenticação</output></section>
+<section><h2>Arquivos</h2><p><a href="/download.txt">Baixar arquivo de teste</a> · <a href="/download-slow.bin">Baixar arquivo lento</a> · <a href="/sample.pdf">Abrir PDF</a></p><form action="/upload" method="post" enctype="multipart/form-data"><input aria-label="Arquivo para upload" type="file" name="document" required><button>Enviar arquivo</button></form></section>
+<section><h2>Mídia e comunicação local</h2><button id="video">Testar vídeo e WebRTC sem câmera</button><button id="camera">Solicitar câmera e microfone</button><video id="preview" autoplay muted playsinline></video><output id="media"></output></section>
+<script>
+window.__initialDPR = window.devicePixelRatio;
+document.querySelector('#oauth').onclick=()=>window.open(location.origin.replace('127.0.0.1','localhost')+'/oauth/start','lume-fixture-auth','popup,width=500,height=500');
+window.addEventListener('message',event=>{if(event.origin===location.origin&&event.data==='lume-auth-pass'){document.querySelector('#auth').textContent='Autenticação concluída';document.title='OAuth PASS';}});
+document.querySelector('#camera').onclick=async()=>{try{const stream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});document.querySelector('#preview').srcObject=stream;document.querySelector('#media').textContent='Câmera e microfone disponíveis';setTimeout(()=>stream.getTracks().forEach(track=>track.stop()),5000);}catch(error){document.querySelector('#media').textContent=error.name;document.title='Permission '+error.name;}};
+window.testLocalMedia=async()=>{try{
+ const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;const context=canvas.getContext('2d');let frame=0;
+ const timer=setInterval(()=>{context.fillStyle=frame++%2?'#617660':'#c0a87d';context.fillRect(0,0,320,180);context.fillStyle='white';context.font='24px sans-serif';context.fillText('Lume vídeo '+frame,30,90);},70);
+ const stream=canvas.captureStream(15);const first=new RTCPeerConnection({iceServers:[]}),second=new RTCPeerConnection({iceServers:[]});
+ first.onicecandidate=event=>{if(event.candidate)second.addIceCandidate(event.candidate).catch(()=>{});};second.onicecandidate=event=>{if(event.candidate)first.addIceCandidate(event.candidate).catch(()=>{});};
+ second.ontrack=event=>{const video=document.querySelector('#preview');video.srcObject=event.streams[0];video.onloadeddata=()=>{document.querySelector('#media').textContent='Vídeo recebido por WebRTC local';document.title='WebRTC PASS';setTimeout(()=>{first.close();second.close();stream.getTracks().forEach(track=>track.stop());clearInterval(timer);},700);};};
+ stream.getTracks().forEach(track=>first.addTrack(track,stream));await first.setLocalDescription(await first.createOffer());await second.setRemoteDescription(first.localDescription);await second.setLocalDescription(await second.createAnswer());await first.setRemoteDescription(second.localDescription);
+ }catch(error){document.title='WebRTC FAIL '+error.name;}};
+document.querySelector('#video').onclick=window.testLocalMedia;
+</script></html>

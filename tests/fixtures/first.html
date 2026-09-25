@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Lume Test One</title>
+<style>body{font:18px system-ui;background:#f7f6f2;color:#252521;margin:64px;max-width:680px}h1{font-size:36px;font-weight:600}a{color:#4d5c95}input{font:inherit;padding:10px}p{line-height:1.7}</style>
+<h1>A page rendered by Chromium.</h1>
+<p>This local fixture checks native navigation, history and tab lifecycle.</p>
+<p><a href="second.html">Continue to the second page</a></p>
+<p><a href="second.html" target="_blank">Open a new tab</a></p>
+<label>Unsaved changes <input id="draft" placeholder="Type to test beforeunload"></label>
+<script>document.querySelector('input').addEventListener('input',()=>{window.onbeforeunload=e=>{e.preventDefault();e.returnValue='';};});</script>
+</html>

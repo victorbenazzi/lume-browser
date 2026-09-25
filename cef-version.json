@@ -1,0 +1,9 @@
+{
+  "version": "154.0.28+g564dd6c+chromium-154.0.8037.58",
+  "chromiumVersion": "154.0.8037.58",
+  "platform": "macosarm64",
+  "archive": "cef_binary_154.0.28+g564dd6c+chromium-154.0.8037.58_macosarm64_minimal.tar.bz2",
+  "sha1": "f7c50c2719deb8aa0c78de517c1228d0b8c3fced",
+  "source": "https://cef-builds.spotifycdn.com/",
+  "cmakeVersion": "4.1.0"
+}

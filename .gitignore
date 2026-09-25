@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+.tools/
+vendor/
+dist/
+*.log
+__pycache__/
+
+# AI agent instructions and working notes stay local
+AGENTS.md
+CLAUDE.md
+.claude/
+.cursor/
