@@ -35,15 +35,16 @@ final class ReliabilityCheck {
             checks.append("tabs, bookmark and searchable history survived restart")
             stage = -1
         case "abrupt-seed":
-            store.newWorkspace(name: "Recovery fixture")
+            store.newTab()
+            store.togglePin(store.activeTabID!)
             store.navigate(baseURL + "/workbench.html#crash-recovery")
         case "abrupt-restore":
-            guard store.currentWorkspace?.name == "Recovery fixture",
+            guard store.activeTab?.pinned == true,
                   store.activeTab?.url == baseURL + "/workbench.html#crash-recovery" else {
-                finish(false, error: "Active tab or workspace lost after forced termination")
+                finish(false, error: "Active tab or its pin lost after forced termination")
                 return
             }
-            checks.append("active tab and workspace recovered after SIGKILL")
+            checks.append("active tab and pin recovered after SIGKILL")
         default: finish(false, error: "Unknown test phase")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 65) { [weak self] in

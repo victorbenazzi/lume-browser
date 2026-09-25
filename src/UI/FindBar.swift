@@ -31,7 +31,6 @@ final class FindBar: LumeView, NSSearchFieldDelegate {
     func focus() { window?.makeFirstResponder(search); search.selectText(nil) }
 
     func refresh(palette: LumePalette) {
-        fillColor = palette.surface
         search.textColor = palette.textPrimary
         countLabel.textColor = palette.textSecondary
         if query.isEmpty { countLabel.stringValue = "" }

@@ -33,6 +33,13 @@ struct NavigationController {
             return try validatedWebURL((isLocal ? "http://" : "https://") + value)
         }
 
+        return try search(value, searchURL: searchURL)
+    }
+
+    /// Always a search, even for text that looks like an address, as when searching a selection.
+    func search(_ text: String, searchURL: String = defaultSearchURL) throws -> String {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { throw NavigationError.invalidURL }
         let template = isSafeSearchURL(searchURL) ? searchURL : Self.defaultSearchURL
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
@@ -40,6 +47,23 @@ struct NavigationController {
             throw NavigationError.invalidURL
         }
         return try validatedWebURL(template.replacingOccurrences(of: "{query}", with: encoded))
+    }
+
+    /// `scheme://host[:port]` for an HTTP or HTTPS address, with the default port left out. Nil for anything else.
+    static func origin(of url: String) -> String? {
+        guard let components = URLComponents(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = components.host?.lowercased(), !host.isEmpty,
+              components.user == nil, components.password == nil else { return nil }
+        let defaultPort = scheme == "https" ? 443 : 80
+        let port = components.port.flatMap { $0 == defaultPort ? nil : ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
+    /// A `blob:` address minted by an HTTP or HTTPS page, as pages use for files they generate.
+    static func isWebBlob(_ url: String) -> Bool {
+        guard url.lowercased().hasPrefix("blob:") else { return false }
+        return origin(of: String(url.dropFirst(5))) != nil
     }
 
     func isSafeSearchURL(_ template: String) -> Bool {

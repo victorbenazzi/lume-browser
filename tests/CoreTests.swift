@@ -15,6 +15,8 @@ private final class FakeEngine: BrowserEngine {
     var zoomChanges: [(UUID, Double)] = []
     var printed: [UUID] = []
     var cancelledDownloads: [String] = []
+    var exitedFullscreen: [UUID] = []
+    weak var permissionPolicy: SitePermissionPolicy?
     func makeView(for tab: Tab) -> NSView { created.append(tab.id); return NSView() }
     func activate(tabID: UUID) { activated.append(tabID) }
     func navigate(tabID: UUID, url: String) { navigated.append((tabID, url)) }
@@ -24,12 +26,18 @@ private final class FakeEngine: BrowserEngine {
     func stop(tabID: UUID) {}
     func setMuted(tabID: UUID, muted: Bool) { muteChanges.append((tabID, muted)) }
     func close(tabID: UUID) { requestedClose.append(tabID) }
-    func showDevTools(tabID: UUID) {}
+    var devToolsRequests: [UUID] = []
+    var closedDevTools: [UUID] = []
+    func showDevTools(tabID: UUID) { devToolsRequests.append(tabID) }
+    func closeDevTools(tabID: UUID) { closedDevTools.append(tabID) }
+    func devToolsView(tabID: UUID) -> NSView? { NSView() }
     func find(tabID: UUID, text: String, forward: Bool, findNext: Bool) { findRequests.append((tabID, text, forward, findNext)) }
     func stopFinding(tabID: UUID) { stoppedFinds.append(tabID) }
     func setZoom(tabID: UUID, level: Double) { zoomChanges.append((tabID, level)) }
     func printPage(tabID: UUID) { printed.append(tabID) }
     func cancelDownload(id: String) { cancelledDownloads.append(id) }
+    func exitFullscreen(tabID: UUID) { exitedFullscreen.append(tabID) }
+    func setPermissionPolicy(_ policy: SitePermissionPolicy) { permissionPolicy = policy }
     func shutdown() { didShutdown = true }
 }
 
@@ -40,16 +48,22 @@ struct CoreTests {
     static func main() throws {
         try testNavigation()
         testLifecycle()
-        try testRestoreAndWorkspaces()
+        try testRestoreAndTabOrder()
         try testAsynchronousDiscard()
         try testCloseCancellationAndEvents()
         try testQuitCancellation()
         try testHistoryAndBookmarks()
+        try testBookmarkFolders()
+        try testBookmarkOrder()
         try testReopenAndAbruptExit()
         try testRecoveryAndMigration()
         try testPageToolsDownloadsAndPopups()
         try testCancelledNavigationKeepsCommittedURL()
-        testCommands()
+        try testInternalPages()
+        try testContextMenuActionsAndFullscreen()
+        testDevTools()
+        try testSitePermissions()
+        testFavicons()
         print("PASS: \(checks) core checks")
     }
 
@@ -81,11 +95,10 @@ struct CoreTests {
     }
 
     private static func testLifecycle() {
-        let workspace = UUID()
         let now = Date()
-        var active = Tab(workspaceId: workspace)
+        var active = Tab()
         active.page.memoryState = .active
-        var old = Tab(workspaceId: workspace)
+        var old = Tab()
         old.page.memoryState = .warm
         old.lastActivatedAt = now.addingTimeInterval(-3600)
         var pinned = old; pinned.id = UUID(); pinned.pinned = true
@@ -111,32 +124,31 @@ struct CoreTests {
         expect(!EngineCapabilities().supportsFreezing, "No false claim of page freezing")
     }
 
-    private static func testRestoreAndWorkspaces() throws {
+    private static func testRestoreAndTabOrder() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let engine = FakeEngine()
         let first = BrowserStore(engine: engine, dataDirectory: directory)
         expect(engine.created.count == 1, "First run materializes one blank tab")
-        let personalID = first.selectedWorkspaceID!
         first.navigate("example.com")
         engine.onEvent?(.url(first.activeTabID!, "https://example.com"))
         first.newTab(url: "https://example.org")
         first.togglePin(first.activeTabID!)
-        first.newWorkspace(name: "  Trabalho  ")
-        let workID = first.selectedWorkspaceID!
+        first.newTab()
         first.navigate("localhost:4321")
         engine.onEvent?(.url(first.activeTabID!, "http://localhost:4321"))
         first.setTheme(.dark)
         first.toggleSidebar()
+        first.setTranslucency(.high)
         let activeID = first.activeTabID!
         first.saveSession()
-        expect(first.currentWorkspace?.name == "Trabalho", "Workspace name is trimmed")
-        expect(first.visibleTabs.count == 1 && first.tabs.count == 3, "Workspace tab list isolates its membership")
+        expect(first.visibleTabs.map(\.url) == ["https://example.org", "https://example.com", "http://localhost:4321"],
+               "All tabs share one list with pinned tabs first")
         let raw = try Data(contentsOf: directory.appendingPathComponent("session.json"))
         _ = try JSONDecoder().decode(BrowserSession.self, from: raw)
         expect(first.persistenceError == nil, "Session writes valid JSON atomically")
         let savedTabs = (try JSONSerialization.jsonObject(with: raw) as? [String: Any])?["tabs"] as? [[String: Any]] ?? []
-        let persistedKeys: Set<String> = ["id", "url", "title", "createdAt", "lastActivatedAt", "workspaceId", "pinned", "muted", "zoomLevel"]
+        let persistedKeys: Set<String> = ["id", "url", "title", "createdAt", "lastActivatedAt", "pinned", "muted", "zoomLevel"]
         expect(!savedTabs.isEmpty && savedTabs.allSatisfy { Set($0.keys).isSubset(of: persistedKeys) },
                "Live page state is never written to the session")
         first.shutdown()
@@ -145,15 +157,15 @@ struct CoreTests {
         let restoreEngine = FakeEngine()
         let restored = BrowserStore(engine: restoreEngine, dataDirectory: directory)
         defer { restored.shutdown() }
-        expect(restored.tabs.count == 3 && restored.workspaces.count == 2, "Session restores tab and workspace entities")
-        expect(restored.activeTabID == activeID && restored.selectedWorkspaceID == workID, "Session restores selected tab and workspace")
+        expect(restored.tabs.count == 3, "Session restores every tab")
+        expect(restored.activeTabID == activeID, "Session restores the selected tab")
         expect(restoreEngine.created == [activeID], "Restore only materializes the active tab")
         expect(restored.tabs.filter { $0.page.memoryState == .discarded }.count == 2, "Inactive restored tabs remain discarded")
-        expect(restored.settings.theme == .dark && !restored.settings.sidebarVisible, "Appearance preferences persist")
-        restored.switchWorkspace(personalID)
-        expect(restored.selectedWorkspaceID == personalID && restored.visibleTabs.count == 2, "Workspace switching updates tabs")
-        expect(restoreEngine.created.count == 2, "Workspace switching lazily materializes its selected tab")
+        expect(restored.settings.theme == .dark && !restored.settings.sidebarVisible && restored.settings.translucency == .high,
+               "Appearance preferences persist")
         expect(restored.visibleTabs.first?.pinned == true, "Pinned tabs sort first")
+        restored.selectTab(restored.visibleTabs[0].id)
+        expect(restoreEngine.created.count == 2, "Selecting a restored tab lazily materializes it")
         expect(restored.tabs.filter { $0.page.memoryState == .active }.count == 1, "Exactly one tab is active")
     }
 
@@ -225,16 +237,164 @@ struct CoreTests {
         expect(store.tabs.count == 1 && store.activeTab?.url == "about:blank", "Closing final tab provides a new blank tab")
     }
 
-    private static func testCommands() {
-        let registry = CommandRegistry()
-        var called = false
-        registry.register(Command(id: "memory", title: "Memória", keywords: ["tabs", "recursos"]) { called = true })
-        expect(registry.matching("memoria").count == 1, "Command matching ignores accents")
-        expect(registry.matching("tabs recursos").count == 1, "Command matching handles multiple terms")
-        registry.matching("").first?.execute()
-        expect(called, "Registered extension command executes")
-        registry.unregister(id: "memory")
-        expect(registry.matching("").isEmpty, "Extension command can be removed")
+    private static func testBookmarkFolders() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        store.navigate("https://a.test")
+        engine.onEvent?(.url(store.activeTabID!, "https://a.test"))
+        store.toggleBookmark()
+        store.newTab(url: "https://b.test")
+        store.toggleBookmark()
+        let first = store.bookmarks.first { $0.url == "https://a.test" }!.id
+        expect(store.bookmarks(inFolder: nil).map(\.url) == ["https://a.test", "https://b.test"], "Favorites keep the order they were added in")
+        expect(store.newBookmarkFolder(name: "   ", icon: "star") == nil, "A folder needs a name")
+        let folder = store.newBookmarkFolder(name: "  Trabalho  ", icon: "not.a.symbol")!
+        expect(store.bookmarkFolders.first?.name == "Trabalho" && store.bookmarkFolders.first?.icon == "folder",
+               "Folder names are trimmed and unknown icons fall back")
+        store.moveBookmark(first, toFolder: folder)
+        store.updateBookmarkFolder(folder, name: "Projetos", icon: "briefcase")
+        store.renameBookmark(first, title: "  Site A  ")
+        expect(store.bookmarks(inFolder: folder).map(\.title) == ["Site A"] && store.bookmarks(inFolder: nil).count == 1,
+               "Bookmarks move into folders")
+        store.openBookmark(first)
+        expect(store.activeTab?.url == "https://a.test" && store.tabs.count == 2, "Opening a favorite switches to its open tab")
+        store.shutdown()
+
+        let restored = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(restored.bookmarkFolders.map(\.icon) == ["briefcase"] && restored.bookmarks(inFolder: folder).count == 1,
+               "Folders and their icons persist")
+        restored.removeBookmarkFolder(folder)
+        expect(restored.bookmarkFolders.isEmpty && restored.bookmarks(inFolder: nil).count == 2,
+               "Deleting a folder keeps its bookmarks at the top level")
+        restored.openBookmark(restored.bookmarks[0].id)
+        expect(restored.activeTab?.url == restored.bookmarks[0].url, "Opening a favorite without a tab opens a new one")
+        restored.shutdown()
+    }
+
+    private static func testBookmarkOrder() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        for host in ["a", "b", "c"] {
+            store.newTab(url: "https://\(host).test")
+            expect(store.bookmarkCurrentPage() != nil, "A web page can be bookmarked")
+        }
+        let first = store.bookmarkCurrentPage()
+        expect(first == store.bookmarks.last?.id && store.bookmarks.count == 3, "Bookmarking a saved page returns its favorite")
+        func order(_ folder: UUID? = nil) -> [String] { store.bookmarks(inFolder: folder).map { URL(string: $0.url)!.host! } }
+        let id = { (host: String) in store.bookmarks.first { $0.url == "https://\(host).test" }!.id }
+        store.moveBookmark(id("c"), toFolder: nil, at: 0)
+        expect(order() == ["c.test", "a.test", "b.test"], "A favorite moves to the front")
+        store.moveBookmark(id("c"), toFolder: nil, at: 2)
+        expect(order() == ["a.test", "b.test", "c.test"], "A favorite moves to the end")
+        let folder = store.newBookmarkFolder(name: "Leitura", icon: "book")!
+        store.moveBookmark(id("b"), toFolder: folder)
+        store.moveBookmark(id("a"), toFolder: folder, at: 0)
+        expect(order(folder) == ["a.test", "b.test"] && order() == ["c.test"], "Favorites drop into a folder at a position")
+        store.moveBookmark(id("b"), toFolder: nil, at: 0)
+        expect(order() == ["b.test", "c.test"] && order(folder) == ["a.test"], "A favorite leaves its folder")
+        let second = store.newBookmarkFolder(name: "Ferramentas", icon: "terminal")!
+        store.moveBookmarkFolder(second, to: 0)
+        expect(store.bookmarkFolders.map(\.id) == [second, folder], "Folders reorder")
+        expect(store.searchBookmarks("").map { URL(string: $0.url)!.host! } == ["c.test", "b.test", "a.test"],
+               "The library still lists favorites newest first")
+        store.shutdown()
+        let restored = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(restored.bookmarks(inFolder: nil).map(\.url) == ["https://b.test", "https://c.test"]
+               && restored.bookmarkFolders.map(\.id) == [second, folder], "The favorites order persists")
+        restored.shutdown()
+
+        // Version 1 stored favorites newest first and showed them in reverse.
+        let url = directory.appendingPathComponent("library.json")
+        var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        legacy["version"] = 1
+        legacy["folders"] = []
+        legacy["bookmarks"] = ["https://new.test", "https://old.test"].map { ["id": UUID().uuidString, "url": $0, "title": $0, "createdAt": 0] }
+        try JSONSerialization.data(withJSONObject: legacy).write(to: url)
+        let migrated = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(migrated.bookmarks(inFolder: nil).map(\.url) == ["https://old.test", "https://new.test"],
+               "Favorites saved by version 1 keep their sidebar order")
+        migrated.moveBookmark(migrated.bookmarks[0].id, toFolder: nil, at: 1)
+        migrated.shutdown()
+        let saved = try LibraryStore(directory: directory).load()
+        expect(saved.version == 2 && saved.bookmarks.map(\.url) == ["https://new.test", "https://old.test"],
+               "The next save writes the current version in sidebar order")
+    }
+
+    private static func testInternalPages() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        let createdBefore = engine.created.count
+        store.openInternalPage(.settings)
+        let settingsID = store.activeTabID!
+        expect(store.activeTab?.url == "lume://ajustes" && store.activeTab?.title == "Ajustes" && engine.created.count == createdBefore,
+               "Settings open in a tab without an engine page")
+        store.openInternalPage(.library)
+        store.openInternalPage(.settings)
+        expect(store.activeTabID == settingsID && store.tabs.count == 3, "An open Lume page is reused")
+        let requests = engine.navigated.count
+        store.reload()
+        store.zoomIn()
+        store.findInPage("texto")
+        expect(engine.navigated.count == requests && store.zoomPercentage == 100 && engine.findRequests.isEmpty
+               && store.activeTab?.page.status == .idle, "Page tools leave Lume pages alone")
+        store.navigate("lume://biblioteca")
+        expect(store.activeTab?.internalPage == .library && store.tabs.count == 3, "Typing a Lume address opens its page")
+        store.discardInactiveTabs()
+        expect(!engine.requestedClose.contains(settingsID), "Lume pages are never discarded")
+        store.selectTab(settingsID)
+        store.navigate("example.com")
+        expect(store.activeTab?.url == "https://example.com" && engine.created.last == settingsID,
+               "Navigating from a Lume page loads the site in the same tab")
+        store.openInternalPage(.library)
+        let libraryID = store.activeTabID!
+        store.shutdown()
+        let restored = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(restored.activeTabID == libraryID && restored.activeTab?.internalPage == .library, "Lume pages survive a restart")
+        restored.closeTab(libraryID)
+        expect(!restored.tabs.contains { $0.id == libraryID }, "A Lume page closes without the engine")
+        restored.shutdown()
+    }
+
+    private static func testFavicons() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        defer { store.shutdown() }
+        let id = store.activeTabID!
+        let icon = NSImage(size: NSSize(width: 16, height: 16))
+        engine.onEvent?(.favicon(id, "https://a.test/favicon.ico"))
+        engine.onEvent?(.faviconImage(id, "https://a.test/old.ico", icon))
+        expect(store.activeTab?.page.faviconImage == nil, "A stale favicon download is ignored")
+        engine.onEvent?(.faviconImage(id, "https://a.test/favicon.ico", icon))
+        expect(store.activeTab?.page.faviconImage === icon, "The current favicon download reaches the tab")
+        engine.onEvent?(.favicon(id, "https://a.test/favicon.ico"))
+        expect(store.activeTab?.page.faviconImage === icon, "Repeating the same favicon keeps its icon")
+        engine.onEvent?(.favicon(id, "https://b.test/favicon.ico"))
+        expect(store.activeTab?.page.faviconImage == nil, "A new favicon shows the fallback until it downloads")
+        engine.onEvent?(.faviconImage(id, "https://b.test/favicon.ico", nil))
+        expect(store.activeTab?.page.faviconImage == nil, "A failed download keeps the fallback")
+
+        let drawn = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            NSColor.systemBlue.setFill()
+            rect.fill()
+            return true
+        }
+        engine.onEvent?(.url(id, "https://c.test/page"))
+        store.toggleBookmark()
+        engine.onEvent?(.favicon(id, "https://c.test/icon.png"))
+        engine.onEvent?(.faviconImage(id, "https://c.test/icon.png", drawn))
+        store.shutdown()
+        let reopened = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        defer { reopened.shutdown() }
+        expect(reopened.favicon(for: reopened.bookmarks[0]) != nil, "Bookmarked hosts keep their icon across launches")
+        reopened.removeBookmark(reopened.bookmarks[0].id)
+        expect(FaviconStore(directory: directory).image(for: "https://c.test") == nil, "Removing the bookmark deletes its icon")
     }
 
     private static func testHistoryAndBookmarks() throws {
@@ -283,7 +443,6 @@ struct CoreTests {
         let firstID = store.activeTabID!
         store.newTab(url: "example.com")
         let closedID = store.activeTabID!
-        let workspaceID = store.selectedWorkspaceID!
         store.newTab(url: "example.org")
         store.closeTab(closedID)
         expect(!store.canReopenClosedTab, "Requested closure is not yet eligible for reopening")
@@ -292,10 +451,9 @@ struct CoreTests {
         store.closeTab(closedID)
         engine.onEvent?(.closed(closedID))
         expect(store.canReopenClosedTab, "Confirmed closure becomes reopenable")
-        store.newWorkspace(name: "Trabalho")
         store.reopenClosedTab()
-        expect(store.activeTabID == closedID && store.selectedWorkspaceID == workspaceID, "Reopening returns to the original workspace")
-        expect(store.currentWorkspace?.tabs[1] == closedID && store.currentWorkspace?.tabs[0] == firstID, "Reopening preserves original position")
+        expect(store.activeTabID == closedID, "Reopening selects the tab")
+        expect(store.tabs.map(\.id).prefix(2) == [firstID, closedID], "Reopening preserves original position")
         expect(!store.canReopenClosedTab, "Reopened entry is consumed once")
         store.closeTab(closedID)
         engine.onEvent?(.closed(closedID))
@@ -310,10 +468,7 @@ struct CoreTests {
         restored.shutdown()
 
         var limited = snapshot
-        let workspace = snapshot.workspaces[0]
-        limited.closedTabs = (0..<40).map { offset in
-            ClosedTab(tab: Tab(url: "https://example.com/\(offset)", workspaceId: workspace.id), workspace: workspace, position: 0)
-        }
+        limited.closedTabs = (0..<40).map { offset in ClosedTab(tab: Tab(url: "https://example.com/\(offset)"), position: 0) }
         try SessionManager(directory: directory).save(limited)
         let bounded = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
         bounded.saveSession()
@@ -325,10 +480,9 @@ struct CoreTests {
     private static func testRecoveryAndMigration() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let workspace = Workspace(name: "Legado")
-        let tab = Tab(url: "https://example.com", workspaceId: workspace.id)
+        let tab = Tab(url: "https://example.com")
         let manager = SessionManager(directory: directory)
-        var first = BrowserSession(tabs: [tab], workspaces: [workspace], activeTabID: tab.id, selectedWorkspaceID: workspace.id)
+        var first = BrowserSession(tabs: [tab], activeTabID: tab.id)
         try manager.save(first)
         first.tabs[0].url = "https://example.org"
         try manager.save(first)
@@ -356,11 +510,28 @@ struct CoreTests {
                "First-milestone profiles load with defaults for new fields")
         expect(migrated.tabs[0].page == PageState(), "Page state saved by earlier versions is ignored")
 
+        let tabIDs = (0..<3).map { _ in UUID() }
+        var grouped = legacy
+        grouped["version"] = 2
+        grouped["tabs"] = tabIDs.map { ["id": $0.uuidString, "url": "https://example.com/\($0)", "workspaceId": UUID().uuidString] }
+        grouped["workspaces"] = [["id": UUID().uuidString, "name": "Trabalho", "tabs": [tabIDs[2].uuidString]],
+                                 ["id": UUID().uuidString, "name": "Pessoal", "tabs": [tabIDs[0].uuidString, tabIDs[1].uuidString]]]
+        try JSONSerialization.data(withJSONObject: grouped).write(to: primary)
+        let merged = try SessionManager(directory: directory).restore()!
+        expect(merged.tabs.map(\.id) == [tabIDs[2], tabIDs[0], tabIDs[1]], "Workspace tabs merge into one list in workspace order")
+
         let oldSettings = Data("{\"theme\":\"dark\",\"memoryPolicy\":{\"warmTabLimit\":3}}".utf8)
         try oldSettings.write(to: directory.appendingPathComponent("settings.json"))
         let settings = try SettingsStore(directory: directory).load()
-        expect(settings.theme == .dark && settings.memoryPolicy.warmTabLimit == 3 && !settings.memoryPolicy.automaticDiscardEnabled,
+        expect(settings.theme == .dark && settings.memoryPolicy.warmTabLimit == 3 && !settings.memoryPolicy.automaticDiscardEnabled
+               && settings.translucency == .medium && settings.favoritesLayout == .icons && !settings.favoritesCollapsed,
                "Missing preference fields use safe defaults")
+        for (saved, level) in [("true", Translucency.medium), ("false", .off)] {
+            try Data("{\"translucency\":\(saved)}".utf8).write(to: directory.appendingPathComponent("settings.json"))
+            let loaded = try SettingsStore(directory: directory).load()
+            expect(loaded.translucency == level,
+                   "The earlier glass switch becomes a transparency level")
+        }
 
         legacy["version"] = 999
         let future = try JSONSerialization.data(withJSONObject: legacy)
@@ -508,6 +679,143 @@ struct CoreTests {
         engine.didShutdown = false
         store.shutdown()
         expect(engine.didShutdown, "Quit can be attempted again after cancellation")
+    }
+
+    private static func testContextMenuActionsAndFullscreen() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        store.newTab(url: "example.com")
+        let pageID = store.activeTabID!
+        store.newTab(url: "example.net")
+        store.selectTab(pageID)
+
+        engine.onEvent?(.openInBackground(pageID, "https://example.org/artigo"))
+        let order = store.tabs.map(\.url)
+        expect(store.activeTabID == pageID, "A link opened from the menu leaves the current tab in front")
+        expect(order.firstIndex(of: "https://example.org/artigo") == order.firstIndex(of: "https://example.com")! + 1,
+               "A background link opens beside the tab it came from")
+        let backgroundID = store.tabs.first { $0.url == "https://example.org/artigo" }!.id
+        expect(engine.created.contains(backgroundID) && store.tabs.first { $0.id == backgroundID }?.page.memoryState == .warm,
+               "A background link starts loading at once")
+        let count = store.tabs.count
+        engine.onEvent?(.openInBackground(pageID, "javascript:alert(1)"))
+        expect(store.tabs.count == count, "Only web links open from the menu")
+
+        engine.onEvent?(.searchSelection(pageID, "  apple.com  "))
+        expect(store.activeTab?.url.hasPrefix("https://duckduckgo.com/?q=apple.com") == true,
+               "Searching a selection that looks like an address still searches")
+        store.selectTab(pageID)
+
+        let blobID = UUID()
+        engine.onEvent?(.popupCreated(blobID, "blob:https://example.com/5e0c"))
+        expect(store.activeTab?.url == "blob:https://example.com/5e0c" && store.activeTab?.title == "example.com",
+               "A generated file opened by a page keeps its blob address")
+        let foreignBlob = UUID()
+        engine.onEvent?(.popupCreated(foreignBlob, "blob:null/5e0c"))
+        expect(!store.tabs.contains { $0.id == foreignBlob } && engine.requestedClose.contains(foreignBlob),
+               "A blob address without a web origin is refused")
+        expect(NavigationController.isWebBlob("blob:http://localhost:3000/x") && !NavigationController.isWebBlob("blob:file:///x"),
+               "Only blobs minted by web pages count")
+        engine.onEvent?(.popup("blob:https://example.com/9a1f"))
+        expect(store.activeTab?.url == "blob:https://example.com/9a1f", "A blob link opened with Command-click gets its own tab")
+
+        store.selectTab(pageID)
+        engine.onEvent?(.fullscreen(pageID, true))
+        expect(store.fullscreenTabID == pageID, "The active page can enter fullscreen")
+        engine.onEvent?(.fullscreen(backgroundID, true))
+        expect(store.fullscreenTabID == pageID && engine.exitedFullscreen.last == backgroundID,
+               "A background page is sent back out of fullscreen")
+        store.selectTab(backgroundID)
+        expect(store.fullscreenTabID == nil && engine.exitedFullscreen.last == pageID, "Switching tabs ends the page's fullscreen")
+        engine.onEvent?(.fullscreen(backgroundID, true))
+        store.exitFullscreen()
+        expect(store.fullscreenTabID == nil && engine.exitedFullscreen.last == backgroundID, "Esc ends the page's fullscreen through the engine")
+        engine.onEvent?(.fullscreen(backgroundID, true))
+        engine.onEvent?(.fullscreen(backgroundID, false))
+        expect(store.fullscreenTabID == nil, "The page can leave fullscreen on its own")
+        engine.onEvent?(.fullscreen(backgroundID, true))
+        store.closeTab(backgroundID)
+        engine.onEvent?(.closed(backgroundID))
+        expect(store.fullscreenTabID == nil, "Closing the tab clears its fullscreen")
+        store.shutdown()
+    }
+
+    private static func testDevTools() {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        defer { store.shutdown() }
+        store.navigate("example.com")
+        let pageID = store.activeTabID!
+        store.toggleDevTools()
+        expect(engine.devToolsRequests == [pageID] && !store.showsDevTools, "DevTools shows only once the engine reports it open")
+        engine.onEvent?(.devTools(pageID, true))
+        expect(store.showsDevTools && store.devToolsView(for: pageID) != nil, "Open DevTools has a view for the panel")
+        store.newTab(url: "example.net")
+        expect(!store.showsDevTools, "Another tab shows no DevTools of its own")
+        store.selectTab(pageID)
+        store.toggleDevTools()
+        expect(engine.closedDevTools == [pageID], "Toggling again closes DevTools")
+        engine.onEvent?(.devTools(pageID, false))
+        expect(!store.showsDevTools && store.devToolsView(for: pageID) == nil, "Closed DevTools leaves the panel")
+        engine.onEvent?(.devTools(pageID, true))
+        store.closeTab(pageID)
+        engine.onEvent?(.closed(pageID))
+        engine.onEvent?(.devTools(pageID, false))
+        expect(store.devToolsView(for: pageID) == nil, "A closed tab takes its DevTools with it")
+        store.setDevToolsWidth(512)
+        store.saveSession()
+        let reopened = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        defer { reopened.shutdown() }
+        expect(reopened.settings.devToolsWidth == 512, "The panel keeps its width across launches")
+    }
+
+    private static func testSitePermissions() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        var store: BrowserStore? = BrowserStore(engine: engine, dataDirectory: directory)
+        expect(engine.permissionPolicy === store, "The store answers the engine's permission questions")
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: .camera) == nil, "Nothing is remembered at first")
+
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "https://Meet.Example.com:443/", permission: .camera, allowed: true)))
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "https://meet.example.com", permission: .microphone, allowed: false)))
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "https://meet.example.com", permission: .externalApp("ZoomMTG"), allowed: true)))
+        expect(store!.permissionDecision(origin: "https://meet.example.com/sala?x=1", permission: .camera) == true,
+               "A remembered answer applies to the whole origin")
+        expect(store!.permissionDecision(origin: "http://meet.example.com", permission: .camera) == nil,
+               "HTTP and HTTPS are different sites")
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: .microphone) == false, "Refusals are remembered too")
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: SitePermission(rawValue: "external:zoommtg")) == true,
+               "External app permissions are kept per scheme")
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "https://meet.example.com", permission: .camera, allowed: false)))
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: .camera) == false && store!.sitePermissions.count == 3,
+               "A new answer replaces the old one")
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "file:///etc", permission: .camera, allowed: true)))
+        engine.onEvent?(.permissionDecided(SitePermissionDecision(origin: "https://example.com", permission: SitePermission(rawValue: "notifications"), allowed: true)))
+        expect(store!.sitePermissions.count == 3, "Non-web origins and unknown permissions are not stored")
+        store!.shutdown()
+        store = nil
+
+        store = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: .microphone) == false && store!.sitePermissions.count == 3,
+               "Remembered answers survive a restart")
+        store!.forgetPermission(origin: "https://meet.example.com", permission: .microphone)
+        expect(store!.permissionDecision(origin: "https://meet.example.com", permission: .microphone) == nil, "Forgetting an answer makes the site ask again")
+        store!.forgetAllPermissions()
+        expect(store!.sitePermissions.isEmpty, "All answers can be forgotten at once")
+        store!.shutdown()
+
+        let settingsURL = directory.appendingPathComponent("settings.json")
+        let tampered = #"{"sitePermissions":[{"origin":"https://a.example","permission":"camera","allowed":true,"decidedAt":0},{"origin":"https://a.example","permission":"camera","allowed":false,"decidedAt":1},{"origin":"javascript:x","permission":"camera","allowed":true,"decidedAt":0},{"origin":"https://b.example","permission":"external:../x","allowed":true,"decidedAt":0}]}"#
+        try Data(tampered.utf8).write(to: settingsURL)
+        let reloaded = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(reloaded.sitePermissions.count == 1 && reloaded.permissionDecision(origin: "https://a.example", permission: .camera) == false,
+               "Loading keeps the latest valid answer per site and drops malformed entries")
+        reloaded.shutdown()
     }
 
     private static func temporaryDirectory() -> URL {

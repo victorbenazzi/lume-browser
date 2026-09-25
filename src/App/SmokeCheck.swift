@@ -10,6 +10,9 @@ final class SmokeCheck {
     private var originalID: UUID?
     private var secondID: UUID?
     private var checks: [String] = []
+    private var windowsBeforeDevTools = 0
+    /// Protocol methods the DevTools frontend sent, in order.
+    private var devToolsMethods: [String] = []
     private var finished = false
     var completion: ((Bool) -> Void)?
 
@@ -75,15 +78,35 @@ final class SmokeCheck {
         case 7 where event["kind"] as? String == "closed":
             guard let secondID, !store.tabs.contains(where: { $0.id == secondID }) else { return }
             checks.append("close removes only the selected browser instance")
+            stage = 8
+            windowsBeforeDevTools = NSApp.windows.filter(\.isVisible).count
+            // Inspecting the heading, as the page's context menu does.
+            engine.inspectForTesting(tabID: originalID!, x: 120, y: 84)
+        case 8 where ["devTools", "devToolsProtocol"].contains(event["kind"] as? String):
+            if event["kind"] as? String == "devToolsProtocol", let method = event["value"] as? String { devToolsMethods.append(method) }
+            guard let originalID, store.showsDevTools, devToolsMethods.contains("DOM.pushNodesByBackendIdsToFrontend") else { return }
+            guard store.devToolsView(for: originalID)?.subviews.isEmpty == false, devToolsMethods.contains("DOM.getDocument") else {
+                finish(false, error: "DevTools did not open in its panel"); return
+            }
+            guard NSApp.windows.filter(\.isVisible).count == windowsBeforeDevTools else {
+                finish(false, error: "DevTools opened a window of its own"); return
+            }
+            checks.append("DevTools opens in the panel, reads the page and reveals the inspected node")
+            stage = 9
+            store.toggleDevTools()
+        case 9 where event["kind"] as? String == "devTools":
+            guard let originalID, !store.showsDevTools, store.devToolsView(for: originalID) == nil else {
+                finish(false, error: "DevTools did not close"); return
+            }
+            checks.append("DevTools closes with the page still open")
             store.toggleSidebar()
             store.setTheme(.dark)
-            store.newWorkspace(name: "Smoke Workspace")
+            let folder = store.newBookmarkFolder(name: "Smoke", icon: "star")
             store.setTheme(.light)
-            guard store.workspaces.count == 2, store.activeTab?.workspaceId == store.selectedWorkspaceID,
-                  !store.commands(matching: "tema").isEmpty else {
-                finish(false, error: "Workspace or command invariant failed"); return
+            guard folder != nil, store.bookmarkFolders.count == 1 else {
+                finish(false, error: "Favorites invariant failed"); return
             }
-            checks.append("workspace, theme, sidebar and command state")
+            checks.append("favorites, theme and sidebar state")
             store.saveSession()
             finish(true)
         default: break
@@ -95,6 +118,7 @@ final class SmokeCheck {
         finished = true
         engine.onDiagnosticEvent = nil
         var report: [String: Any] = ["passed": passed, "checks": checks, "stage": stage,
+                                     "devToolsMethods": Array(devToolsMethods.prefix(40)),
                                      "engine": "CEF 154 ARM64", "sandboxConfigured": true]
         if let error { report["error"] = error }
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {

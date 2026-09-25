@@ -1,6 +1,8 @@
 import AppKit
 
-final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
+/// History, favorites and downloads, drawn on the page card of their own tab. Favorites are arranged here too:
+/// folders with their bookmarks in sidebar order, reordered and moved by dragging.
+final class LibraryPage: NSObject, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     enum Section: Int { case history, bookmarks, downloads }
 
     private struct Item {
@@ -16,9 +18,17 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         let secondaryLabel: String?
         let secondarySymbol: String?
         let secondaryAction: (() -> Void)?
+        var indent: CGFloat = 0
+        /// Shown instead of the symbol, as is.
+        var image: NSImage?
+        var favorite: FavoriteKind?
+        /// The folder holding a bookmark, as in the sidebar.
+        var folderID: UUID?
+        /// Index among the folders, or among the bookmarks sharing the folder.
+        var position = 0
 
         var structure: ItemStructure {
-            ItemStructure(id: id, symbol: symbol, hasProgress: progress != nil || indeterminate,
+            ItemStructure(id: id, symbol: symbol, indent: indent, hasProgress: progress != nil || indeterminate,
                           primaryLabel: primaryLabel, primarySymbol: primarySymbol,
                           secondaryLabel: secondaryLabel, secondarySymbol: secondarySymbol)
         }
@@ -27,6 +37,7 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
     private struct ItemStructure: Equatable {
         let id: String
         let symbol: String
+        let indent: CGFloat
         let hasProgress: Bool
         let primaryLabel: String?
         let primarySymbol: String?
@@ -41,12 +52,13 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         private var primaryButton: QuietButton?
         private var secondaryButton: QuietButton?
         private var progressIndicator: NSProgressIndicator?
+        private let indent: CGFloat
         private var buttons: [QuietButton] { [primaryButton, secondaryButton].compactMap { $0 } }
 
         init(item: Item, palette: LumePalette, selected: Bool) {
+            indent = item.indent
             super.init(frame: .zero)
             cornerRadius = 6
-            icon.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
             addSubview(icon)
             addSubview(titleLabel)
             addSubview(subtitleLabel)
@@ -87,12 +99,13 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
             }
             titleLabel.textColor = palette.textPrimary
             subtitleLabel.textColor = palette.textSecondary
-            icon.contentTintColor = palette.textMuted
+            icon.image = item.image ?? NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
+            icon.contentTintColor = item.image == nil ? palette.textMuted : nil
             primaryButton?.actionHandler = item.primaryAction
             secondaryButton?.actionHandler = item.secondaryAction
             for button in buttons {
                 button.contentTintColor = palette.textSecondary
-                button.hoverColor = palette.elevated
+                button.hoverColor = palette.isTranslucent ? palette.separator : palette.elevated
             }
             if let indicator = progressIndicator {
                 if indicator.isIndeterminate != item.indeterminate {
@@ -106,19 +119,22 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
 
         override func layout() {
             super.layout()
-            icon.frame = NSRect(x: 12, y: 17, width: 17, height: 17)
+            icon.frame = NSRect(x: 12 + indent, y: 17, width: 17, height: 17)
+            let leading = 42 + indent
             let trailing = CGFloat(max(1, buttons.count)) * 32 + 16
-            titleLabel.frame = NSRect(x: 42, y: 11, width: max(0, bounds.width - 42 - trailing), height: 20)
-            subtitleLabel.frame = NSRect(x: 42, y: 34, width: max(0, bounds.width - 42 - trailing), height: 17)
-            progressIndicator?.frame = NSRect(x: 42, y: 59, width: max(0, bounds.width - 42 - trailing), height: 4)
+            titleLabel.frame = NSRect(x: leading, y: 11, width: max(0, bounds.width - leading - trailing), height: 20)
+            subtitleLabel.frame = NSRect(x: leading, y: 34, width: max(0, bounds.width - leading - trailing), height: 17)
+            progressIndicator?.frame = NSRect(x: leading, y: 59, width: max(0, bounds.width - leading - trailing), height: 4)
             for (index, button) in buttons.enumerated() {
                 button.frame = NSRect(x: bounds.width - 42 - CGFloat(index) * 32, y: 16, width: 28, height: 28)
             }
         }
     }
 
+    let view = LumeView()
     private let store: BrowserStore
-    private let root = LumeView()
+    /// A column of limited width, centered on wide pages.
+    private let content = LumeView()
     private let heading = lumeLabel("Biblioteca", size: 24, weight: .medium)
     private let sections = NSSegmentedControl(labels: ["Histórico", "Favoritos", "Downloads"], trackingMode: .selectOne, target: nil, action: nil)
     private let search = NSSearchField()
@@ -126,6 +142,8 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
     private let scroll = NSScrollView()
     private let table = NSTableView()
     private let clearButton = NSButton(title: "Limpar histórico…", target: nil, action: nil)
+    private let newFolderButton = NSButton(title: "Nova pasta…", target: nil, action: nil)
+    private let contextMenu = NSMenu()
     private let emptyTitle = lumeLabel("", size: 18, weight: .medium)
     private let emptyDescription = NSTextField(wrappingLabelWithString: "")
     private let footer = lumeLabel("", size: 11)
@@ -135,18 +153,22 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
     private var palette = LumePalette.light
     private var lastDarkAppearance: Bool?
     var onOpenURL: ((String) -> Void)?
+    /// Asks the owner for the favorite editor, pointing at a rectangle of a view.
+    var onEditBookmark: ((UUID, NSRect, NSView) -> Void)?
+    /// Favorites are dragged while they show in sidebar order, not while a search filters them.
+    private var arranging: Bool {
+        section == .bookmarks && search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static let columnWidth: CGFloat = 760
+    private static let topInset: CGFloat = 24
 
     init(store: BrowserStore) {
         self.store = store
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 570), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Biblioteca do Lume"
-        window.minSize = NSSize(width: 600, height: 440)
-        window.isReleasedWhenClosed = false
-        window.center()
-        super.init(window: window)
-        window.contentView = root
-        let views: [NSView] = [heading, sections, search, summary, scroll, clearButton, emptyTitle, emptyDescription, footer]
-        views.forEach { root.addSubview($0) }
+        super.init()
+        view.addSubview(content)
+        let views: [NSView] = [heading, sections, search, summary, scroll, clearButton, newFolderButton, emptyTitle, emptyDescription, footer]
+        views.forEach { content.addSubview($0) }
         sections.target = self
         sections.action = #selector(changeSection)
         sections.selectedSegment = 0
@@ -155,6 +177,9 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         clearButton.bezelStyle = .rounded
         clearButton.target = self
         clearButton.action = #selector(clearHistory)
+        newFolderButton.bezelStyle = .rounded
+        newFolderButton.target = self
+        newFolderButton.action = #selector(newFolder)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
         table.addTableColumn(column)
         table.headerView = nil
@@ -167,39 +192,36 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         table.target = self
         table.doubleAction = #selector(openSelected)
         table.setAccessibilityLabel("Itens da biblioteca")
+        table.registerForDraggedTypes([.lumeFavorite])
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
+        table.setDraggingSourceOperationMask(.copy, forLocal: false)
+        table.draggingDestinationFeedbackStyle = .regular
+        contextMenu.delegate = self
+        table.menu = contextMenu
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         emptyDescription.font = .systemFont(ofSize: 13)
-        root.onLayout = { [weak self] in self?.layout() }
-        root.onAppearanceChange = { [weak self] in self?.applyTheme(appearance: self?.window?.appearance) }
-        applyTheme(appearance: nil)
+        view.onLayout = { [weak self] in self?.layout() }
     }
 
-    required init?(coder: NSCoder) { nil }
-
-    func show(section: Section, appearance: NSAppearance?) {
+    /// Switches to a section with an empty search.
+    func select(_ section: Section) {
         self.section = section
         sections.selectedSegment = section.rawValue
         search.stringValue = ""
-        applyTheme(appearance: appearance)
         refresh()
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        window?.makeFirstResponder(search)
     }
 
-    func applyTheme(appearance: NSAppearance?) {
-        if window?.appearance !== appearance { window?.appearance = appearance }
-        guard let window else { return }
-        let isDark = window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let changed = lastDarkAppearance != isDark
-        lastDarkAppearance = isDark
-        palette = .current(for: window.effectiveAppearance)
-        root.fillColor = palette.background
-        window.backgroundColor = palette.background
-        table.backgroundColor = palette.background
+    func focusSearch() { view.window?.makeFirstResponder(search) }
+
+    func apply(_ palette: LumePalette) {
+        let changed = lastDarkAppearance != palette.isDark
+        lastDarkAppearance = palette.isDark
+        self.palette = palette
+        view.fillColor = palette.elevated
+        table.backgroundColor = palette.elevated
         heading.textColor = palette.textPrimary
         summary.textColor = palette.textSecondary
         emptyTitle.textColor = palette.textPrimary
@@ -233,17 +255,19 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
             footer.stringValue = "O histórico é armazenado neste Mac."
         case .bookmarks:
             search.placeholderString = "Buscar favoritos"
-            items = store.searchBookmarks(query).map { bookmark in
-                Item(id: bookmark.id.uuidString, title: bookmark.title.isEmpty ? bookmark.url : bookmark.title,
-                     subtitle: displayURL(bookmark.url), symbol: "bookmark",
-                     progress: nil, indeterminate: false,
-                     primaryLabel: "Abrir favorito", primarySymbol: "arrow.up.right", primaryAction: { [weak self] in self?.openURL(bookmark.url) },
-                     secondaryLabel: "Remover favorito", secondarySymbol: "xmark", secondaryAction: { [weak self] in self?.store.removeBookmark(bookmark.id) })
+            if query.isEmpty {
+                items = bookmarkTree()
+                let bookmarks = store.bookmarks.count, folders = store.bookmarkFolders.count
+                summary.stringValue = "\(bookmarks) \(bookmarks == 1 ? "favorito" : "favoritos")"
+                    + (folders == 0 ? "" : " · \(folders) \(folders == 1 ? "pasta" : "pastas")")
+            } else {
+                items = store.searchBookmarks(query).map { bookmarkItem($0, position: 0, indent: 0, showingFolder: true) }
+                summary.stringValue = "\(items.count) \(items.count == 1 ? "favorito" : "favoritos")"
             }
-            summary.stringValue = "\(items.count) \(items.count == 1 ? "favorito" : "favoritos")"
             emptyTitle.stringValue = query.isEmpty ? "Guarde as páginas que quer revisitar" : "Nenhum favorito encontrado"
             emptyDescription.stringValue = query.isEmpty ? "Use a estrela na barra de endereço ou ⌘D para favoritar a página atual." : "Tente outro título ou endereço."
-            footer.stringValue = "Abra um favorito pelo botão à direita ou com dois cliques."
+            footer.stringValue = query.isEmpty ? "Arraste para reordenar ou mover para uma pasta. Clique com o botão direito para mais opções."
+                : "Abra um favorito pelo botão à direita ou com dois cliques."
         case .downloads:
             search.placeholderString = "Buscar downloads"
             let downloads = store.downloads.filter { query.isEmpty || $0.filename.localizedCaseInsensitiveContains(query) || $0.url.localizedCaseInsensitiveContains(query) }
@@ -257,6 +281,7 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         search.setAccessibilityLabel(search.placeholderString)
         clearButton.isHidden = section != .history
         clearButton.isEnabled = !store.history.isEmpty
+        newFolderButton.isHidden = section != .bookmarks
         let structureChanged = renderedSection != section || previousStructures != items.map(\.structure)
         if structureChanged {
             renderedSection = section
@@ -272,6 +297,32 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         emptyDescription.isHidden = !items.isEmpty
         scroll.isHidden = items.isEmpty
         layout()
+    }
+
+    /// Folders with their bookmarks, then the top level: the sidebar order.
+    private func bookmarkTree() -> [Item] {
+        var tree: [Item] = []
+        for (position, folder) in store.bookmarkFolders.enumerated() {
+            let contents = store.bookmarks(inFolder: folder.id)
+            tree.append(Item(id: folder.id.uuidString, title: folder.name,
+                             subtitle: contents.isEmpty ? "Pasta vazia" : "\(contents.count) \(contents.count == 1 ? "favorito" : "favoritos")",
+                             symbol: folder.icon, progress: nil, indeterminate: false,
+                             primaryLabel: "Editar pasta", primarySymbol: "pencil", primaryAction: { [weak self] in self?.editFolder(folder) },
+                             secondaryLabel: "Apagar pasta", secondarySymbol: "xmark", secondaryAction: { [weak self] in self?.store.removeBookmarkFolder(folder.id) },
+                             favorite: .folder(folder.id), position: position))
+            tree += contents.enumerated().map { bookmarkItem($1, position: $0, indent: 26, showingFolder: false) }
+        }
+        return tree + store.bookmarks(inFolder: nil).enumerated().map { bookmarkItem($1, position: $0, indent: 0, showingFolder: false) }
+    }
+
+    private func bookmarkItem(_ bookmark: Bookmark, position: Int, indent: CGFloat, showingFolder: Bool) -> Item {
+        let folder = showingFolder ? store.bookmarkFolders.first { $0.id == bookmark.folderID } : nil
+        return Item(id: bookmark.id.uuidString, title: bookmark.title.isEmpty ? bookmark.url : bookmark.title,
+                    subtitle: displayURL(bookmark.url) + (folder.map { " · \($0.name)" } ?? ""), symbol: "globe",
+                    progress: nil, indeterminate: false,
+                    primaryLabel: "Abrir favorito", primarySymbol: "arrow.up.right", primaryAction: { [weak self] in self?.openURL(bookmark.url) },
+                    secondaryLabel: "Remover favorito", secondarySymbol: "xmark", secondaryAction: { [weak self] in self?.store.removeBookmark(bookmark.id) },
+                    indent: indent, image: store.favicon(for: bookmark), favorite: .bookmark(bookmark.id), folderID: bookmark.folderID, position: position)
     }
 
     private func downloadItem(_ download: BrowserDownload) -> Item {
@@ -315,7 +366,7 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
             alert.messageText = "Arquivo não encontrado"
             alert.informativeText = "O arquivo pode ter sido movido ou removido do local onde foi salvo."
             alert.addButton(withTitle: "OK")
-            if let window { alert.beginSheetModal(for: window) }
+            if let window = view.window { alert.beginSheetModal(for: window) }
             return
         }
         if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -338,7 +389,11 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
             table.scrollRowToVisible(table.selectedRow)
             return true
         }
-        if selector == #selector(NSResponder.cancelOperation(_:)) { window?.performClose(nil); return true }
+        if selector == #selector(NSResponder.cancelOperation(_:)), !search.stringValue.isEmpty {
+            search.stringValue = ""
+            refresh()
+            return true
+        }
         return false
     }
 
@@ -346,7 +401,7 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         section = Section(rawValue: sections.selectedSegment) ?? .history
         search.stringValue = ""
         refresh()
-        window?.makeFirstResponder(search)
+        focusSearch()
     }
 
     @objc private func openSelected() {
@@ -355,8 +410,23 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
         if section != .downloads { items[index].primaryAction?() }
     }
 
+    @objc private func newFolder() { editFolder(nil) }
+
+    private func editFolder(_ folder: BookmarkFolder?, moving bookmarkID: UUID? = nil) {
+        guard let window = view.window else { return }
+        FavoriteActions.editFolder(folder, store: store, in: window, moving: bookmarkID)
+    }
+
+    /// The favorite editor points at the row's title.
+    private func editBookmark(_ id: UUID) {
+        guard let row = items.firstIndex(where: { $0.favorite == .bookmark(id) }) else { return }
+        let rect = table.rect(ofRow: row)
+        let leading = 42 + items[row].indent
+        onEditBookmark?(id, NSRect(x: rect.minX + leading, y: rect.minY + 8, width: min(240, max(0, rect.width - leading)), height: rect.height - 16), table)
+    }
+
     @objc private func clearHistory() {
-        guard let window else { return }
+        guard let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = "Limpar histórico de navegação?"
         alert.informativeText = "Os registros de páginas visitadas neste Mac serão removidos. Seus favoritos e arquivos baixados serão mantidos."
@@ -368,13 +438,17 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
     }
 
     private func layout() {
-        let width = root.bounds.width
-        let height = root.bounds.height
+        let columnWidth = min(Self.columnWidth, view.bounds.width)
+        content.frame = NSRect(x: ((view.bounds.width - columnWidth) / 2).rounded(), y: Self.topInset,
+                               width: columnWidth, height: max(0, view.bounds.height - Self.topInset))
+        let width = content.bounds.width
+        let height = content.bounds.height
         heading.frame = NSRect(x: 24, y: 23, width: 200, height: 34)
         sections.frame = NSRect(x: width - 330, y: 27, width: 306, height: 28)
         search.frame = NSRect(x: 24, y: 79, width: width - 48, height: 28)
         summary.frame = NSRect(x: 26, y: 128, width: width - 220, height: 18)
         clearButton.frame = NSRect(x: width - 174, y: 119, width: 154, height: 30)
+        newFolderButton.frame = NSRect(x: width - 140, y: 119, width: 120, height: 30)
         scroll.frame = NSRect(x: 16, y: 162, width: width - 32, height: max(0, height - 203))
         table.tableColumns.first?.width = width - 32
         let emptyY = max(190, height * 0.44)
@@ -398,5 +472,101 @@ final class LibraryWindowController: NSWindowController, NSSearchFieldDelegate, 
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         ItemRow(item: items[row], palette: palette, selected: row == table.selectedRow)
+    }
+
+    // MARK: Arranging favorites
+
+    /// Where a drop lands, and the row the table marks for it.
+    private enum Destination {
+        case into(UUID)
+        case bookmark(folder: UUID?, index: Int)
+        case folder(index: Int)
+    }
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard arranging, items.indices.contains(row), let favorite = items[row].favorite else { return nil }
+        return favorite.pasteboardItem(in: store)
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard let drop = drop(info, row: row, operation: operation) else { return [] }
+        tableView.setDropRow(drop.row, dropOperation: drop.operation)
+        return .move
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let kind = FavoriteKind(pasteboard: info.draggingPasteboard, in: store),
+              let drop = drop(info, row: row, operation: dropOperation) else { return false }
+        switch (kind, drop.destination) {
+        case (.bookmark(let id), .into(let folder)): store.moveBookmark(id, toFolder: folder)
+        case (.bookmark(let id), .bookmark(let folder, let index)): FavoriteActions.placeBookmark(id, inFolder: folder, at: index, store: store)
+        case (.folder(let id), .folder(let index)): FavoriteActions.placeFolder(id, at: index, store: store)
+        default: return false
+        }
+        return true
+    }
+
+    /// Bookmarks go into a folder over its row and between rows elsewhere. Folders move as a block with their bookmarks.
+    private func drop(_ info: NSDraggingInfo, row: Int, operation: NSTableView.DropOperation)
+        -> (row: Int, operation: NSTableView.DropOperation, destination: Destination)? {
+        guard arranging, let kind = FavoriteKind(pasteboard: info.draggingPasteboard, in: store) else { return nil }
+        var gap = min(max(0, row), items.count)
+        if operation == .on, items.indices.contains(row) {
+            if case .bookmark(let id) = kind, case .folder(let folder)? = items[row].favorite {
+                let alreadyThere = store.bookmarks.first { $0.id == id }?.folderID == folder
+                return alreadyThere ? nil : (row, .on, .into(folder))
+            }
+            // Over another row, the half under the pointer picks the side.
+            if table.convert(info.draggingLocation, from: nil).y > table.rect(ofRow: row).midY { gap = row + 1 }
+        }
+        switch kind {
+        case .bookmark:
+            // A gap belongs to the bookmark under it. Over a folder row it ends the folder above, and at the end it is the top level.
+            if gap < items.count, case .bookmark? = items[gap].favorite {
+                return (gap, .above, .bookmark(folder: items[gap].folderID, index: items[gap].position))
+            }
+            guard gap > 0 else { return nil }
+            if gap == items.count { return (gap, .above, .bookmark(folder: nil, index: store.bookmarks(inFolder: nil).count)) }
+            let above = items[gap - 1]
+            switch above.favorite {
+            case .folder(let folder)?: return (gap, .above, .bookmark(folder: folder, index: 0))
+            case .bookmark?: return (gap, .above, .bookmark(folder: above.folderID, index: above.position + 1))
+            case nil: return nil
+            }
+        case .folder:
+            // Folders come before the top level, and a line never splits a folder from its bookmarks.
+            let foldersEnd = items.firstIndex { if case .bookmark? = $0.favorite { return $0.folderID == nil }; return false } ?? items.count
+            gap = min(gap, foldersEnd)
+            while gap < foldersEnd, items[gap].folderID != nil { gap += 1 }
+            var index = store.bookmarkFolders.count
+            if gap < foldersEnd, case .folder? = items[gap].favorite { index = items[gap].position }
+            return (gap, .above, .folder(index: index))
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard section == .bookmarks else { return }
+        let row = table.clickedRow
+        guard items.indices.contains(row), let favorite = items[row].favorite else {
+            menu.addItem(menuItem("Nova pasta…") { [weak self] in self?.editFolder(nil) })
+            return
+        }
+        switch favorite {
+        case .bookmark(let id):
+            guard let bookmark = store.bookmarks.first(where: { $0.id == id }) else { return }
+            menu.addItem(menuItem("Abrir") { [weak self] in self?.openURL(bookmark.url) })
+            menu.addItem(menuItem("Renomear…") { [weak self] in self?.editBookmark(id) })
+            menu.addItem(FavoriteActions.moveMenuItem(for: bookmark, store: store) { [weak self] in self?.editFolder(nil, moving: id) })
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Apagar favorito") { [weak self] in self?.store.removeBookmark(id) })
+        case .folder(let id):
+            guard let folder = store.bookmarkFolders.first(where: { $0.id == id }) else { return }
+            menu.addItem(menuItem("Editar pasta…") { [weak self] in self?.editFolder(folder) })
+            menu.addItem(menuItem("Nova pasta…") { [weak self] in self?.editFolder(nil) })
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Apagar pasta") { [weak self] in self?.store.removeBookmarkFolder(id) })
+        }
     }
 }

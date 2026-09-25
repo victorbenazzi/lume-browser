@@ -19,6 +19,11 @@ for path in (frameworks, resources, contents / "MacOS"):
 def plist(path, content):
     path.write_bytes(plistlib.dumps(content))
 
+def install_executable(source, destination):
+    # A new file, not a rewrite: a running Lume keeps executing the one it opened.
+    destination.unlink(missing_ok=True)
+    shutil.copy2(source, destination)
+
 def sign(path, entitlements=False):
     args = ["codesign", "--force", "--sign", "-", "--timestamp=none"]
     if entitlements:
@@ -48,7 +53,7 @@ for suffix, identifier in [("", ""), (" (Alerts)", ".alerts"), (" (GPU)", ".gpu"
     helper = frameworks / (name + ".app")
     binary = helper / "Contents/MacOS" / name
     binary.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(root / ".build/LumeHelper", binary)
+    install_executable(root / ".build/LumeHelper", binary)
     helper_resources = helper / "Contents/Resources"
     helper_resources.mkdir(parents=True, exist_ok=True)
     shutil.copy2(app_icon, helper_resources / "Lume.icns")
@@ -62,7 +67,7 @@ for suffix, identifier in [("", ""), (" (Alerts)", ".alerts"), (" (GPU)", ".gpu"
     })
     sign(helper, True)
 
-shutil.copy2(root / ".build/Lume", contents / "MacOS/Lume")
+install_executable(root / ".build/Lume", contents / "MacOS/Lume")
 shutil.copy2(app_icon, resources / "Lume.icns")
 shutil.copy2(root / "vendor/cef/LICENSE.txt", resources / "CEF-LICENSE.txt")
 shutil.copy2(root / "cef-version.json", resources / "cef-version.json")
@@ -75,6 +80,8 @@ plist(contents / "Info.plist", {
     "NSPrincipalClass": "LBApplication", "NSHumanReadableCopyright": "Lume experimental browser",
     "NSCameraUsageDescription": "Sites autorizados por você podem usar a câmera para chamadas de vídeo.",
     "NSMicrophoneUsageDescription": "Sites autorizados por você podem usar o microfone para chamadas e gravações.",
+    "NSLocationUsageDescription": "Sites autorizados por você podem ver sua localização, como em mapas e entregas.",
+    "NSLocationWhenInUseUsageDescription": "Sites autorizados por você podem ver sua localização, como em mapas e entregas.",
 })
 sign(app, True)
 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)

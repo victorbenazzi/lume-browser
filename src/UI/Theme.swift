@@ -11,6 +11,9 @@ struct LumePalette {
     let textMuted: NSColor
     let accent: NSColor
     let error: NSColor
+    var isDark = false
+    var translucency: Translucency = .off
+    var isTranslucent: Bool { translucency != .off }
 
     static let light = LumePalette(
         background: .lumeHex(0xF4F3F0), surface: .lumeHex(0xFAF9F7),
@@ -24,11 +27,74 @@ struct LumePalette {
         elevated: .lumeHex(0x292A2A), selection: .lumeHex(0x333538),
         separator: .lumeHex(0x343636), textPrimary: .lumeHex(0xE8EAE8),
         textSecondary: .lumeHex(0xABB0AC), textMuted: .lumeHex(0x8F9792),
-        accent: .lumeHex(0x98A9E8), error: .lumeHex(0xE99185)
+        accent: .lumeHex(0x98A9E8), error: .lumeHex(0xE99185), isDark: true
     )
 
-    static func current(for appearance: NSAppearance) -> LumePalette {
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+    /// Over the system material, opaque fills become white or black tints so the material shows through.
+    static func current(for appearance: NSAppearance, translucency: Translucency = .off) -> LumePalette {
+        let base: LumePalette = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        guard translucency != .off else { return base }
+        let dark = base.isDark
+        return LumePalette(background: base.background,
+                           surface: dark ? .white.withAlphaComponent(0.07) : .white.withAlphaComponent(0.6),
+                           elevated: base.elevated,
+                           selection: dark ? .white.withAlphaComponent(0.11) : .white.withAlphaComponent(0.85),
+                           separator: dark ? .white.withAlphaComponent(0.08) : .black.withAlphaComponent(0.07),
+                           textPrimary: base.textPrimary, textSecondary: base.textSecondary, textMuted: base.textMuted,
+                           accent: base.accent, error: base.error, isDark: dark, translucency: translucency)
+    }
+
+    /// Lifts the system material toward white or black, so the glass reads light instead of grey.
+    /// The less tint, the more the desktop shows through.
+    var glassTint: NSColor {
+        let alpha: CGFloat
+        switch translucency {
+        case .high: alpha = isDark ? 0.05 : 0.15
+        case .medium: alpha = isDark ? 0.18 : 0.4
+        case .off: alpha = 1
+        }
+        return isDark ? .black.withAlphaComponent(alpha) : .white.withAlphaComponent(alpha)
+    }
+    /// Hairline around the page, drawn above the web content.
+    var pageBorder: NSColor { isDark ? .white.withAlphaComponent(0.09) : .black.withAlphaComponent(0.08) }
+}
+
+/// Apple's translucent material, blurred from what is behind the window. Only app chrome sits on it.
+final class LumeGlassView: NSVisualEffectView {
+    private let tint = LumeView()
+
+    init(material: NSVisualEffectView.Material, cornerRadius: CGFloat = 0) {
+        super.init(frame: .zero)
+        self.material = material
+        blendingMode = .behindWindow
+        // Stays translucent while Settings is key, so toggling the preference shows its effect at once.
+        state = .active
+        autoresizingMask = [.width, .height]
+        tint.cornerRadius = cornerRadius
+        addSubview(tint)
+        guard cornerRadius > 0 else { return }
+        let edge = cornerRadius * 2 + 1
+        let mask = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        mask.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
+        mask.resizingMode = .stretch
+        maskImage = mask
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// Shows the glass only for a translucent palette.
+    func apply(_ palette: LumePalette) {
+        isHidden = !palette.isTranslucent
+        tint.fillColor = palette.glassTint
+    }
+
+    override func layout() {
+        super.layout()
+        tint.frame = bounds
     }
 }
 
@@ -39,6 +105,22 @@ enum LumeMetrics {
     static let controlRadius: CGFloat = 5
     static let fieldRadius: CGFloat = 8
     static let panelRadius: CGFloat = 12
+    static let pageRadius: CGFloat = 10
+    /// Gap between the page card and the window edges it does not share with the sidebar.
+    static let pageInset: CGFloat = 6
+    /// The symbols at the end of the sidebar headings, so the chevron and the plus read as one size and weight.
+    static let headingSymbol = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+    /// The address field on the new tab page: the toolbar's field, larger by about the same proportion.
+    static let heroFieldHeight: CGFloat = 44
+    static let heroFieldRadius: CGFloat = 11
+}
+
+/// Curves shared by Lume's transitions.
+enum LumeMotion {
+    /// Starts at once and settles softly, for what enters or leaves.
+    static let easeOut = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+    /// iOS-like drawer curve, for panels that slide.
+    static let drawer = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1)
 }
 
 extension NSColor {
@@ -72,8 +154,19 @@ class LumeView: NSView {
     }
 }
 
+extension NSView {
+    /// Tracking areas report only changes, so a view created under a resting pointer asks where the pointer is.
+    var containsPointer: Bool {
+        guard let window, window.isKeyWindow, !isHiddenOrHasHiddenAncestor else { return false }
+        return visibleRect.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+}
+
 final class QuietButton: NSButton {
     var hoverColor: NSColor = .clear
+    /// Fill shown while the pointer is elsewhere, for tiles and chosen options.
+    var restingColor: NSColor = .clear { didSet { needsDisplay = true } }
+    var cornerRadius: CGFloat = 5
     private var hovered = false
     private var hoverTracking: NSTrackingArea?
     var actionHandler: (() -> Void)?
@@ -106,10 +199,8 @@ final class QuietButton: NSButton {
     override func mouseExited(with event: NSEvent) { hovered = false; needsDisplay = true }
 
     override func draw(_ dirtyRect: NSRect) {
-        if isEnabled && (hovered || cell?.isHighlighted == true) {
-            hoverColor.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
-        }
+        (isEnabled && (hovered || cell?.isHighlighted == true) ? hoverColor : restingColor).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: cornerRadius, yRadius: cornerRadius).fill()
         super.draw(dirtyRect)
     }
 }

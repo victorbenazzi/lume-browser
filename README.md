@@ -31,24 +31,24 @@
 
 ## Por que o Lume
 
-- **Nativo de verdade.** Janela, barra lateral, paleta de comandos e preferências são AppKit. Nada de Electron ou React.
+- **Nativo de verdade.** Janela, barra lateral, painel de DevTools e preferências são AppKit. Nada de Electron ou React.
 - **Chromium completo.** O CEF traz o motor, o modelo multiprocesso e a sandbox do Chromium, com helpers dedicados.
-- **Memória sob seu controle.** Abas podem ser descartadas de verdade, liberando a instância da página. O descarte automático é opcional e começa desligado.
+- **Memória sob seu controle.** Guias podem ser descartadas de verdade, liberando a instância da página. O descarte automático é opcional e começa desligado.
 - **Local por padrão.** Sessão, histórico e favoritos ficam neste Mac. Sem telemetria, sem conta, sem IA ativa.
 
 ## Recursos
 
 | Área | O que já funciona |
 | :-- | :-- |
-| **Navegação** | URLs HTTP/HTTPS e busca na mesma barra. `localhost` usa HTTP. Protocolos perigosos (`javascript:`, `data:`, `file:`) são recusados |
-| **Abas e espaços** | Espaços de trabalho, abas fixadas, som por aba, reabertura das últimas 25 abas fechadas |
-| **Biblioteca** | Histórico pesquisável (ignora acentos), favoritos e downloads com progresso, cancelamento e "Mostrar no Finder" |
-| **Página** | Busca com contagem de resultados, zoom de 25% a 500% por aba, impressão nativa e visualizador de PDF |
-| **Comandos** | Paleta `⌘K` para executar ações, trocar de aba ou de espaço e abrir endereços |
-| **Aparência** | Temas sistema, claro e escuro |
+| **Navegação** | URLs HTTP/HTTPS e busca na mesma barra. `localhost` usa HTTP. Protocolos perigosos (`javascript:`, `data:`, `file:`) são recusados. Links `mailto:`, `tel:`, `zoommtg:` e outros abrem o app do Mac depois de uma confirmação. Arquivos gerados pela página (`blob:`) abrem numa guia. Login HTTP básico e de proxy com diálogo nativo |
+| **Guias e favoritos** | Guias fixadas, som por guia e reabertura das últimas 25 guias fechadas. Favoritos na barra lateral, em lista ou em blocos (escolha nos Ajustes), com pastas de ícone personalizado e favicon dos sites. Arraste para reordenar ou soltar numa pasta; clique direito para renomear ou apagar |
+| **Biblioteca** | Abre numa guia própria, como os Ajustes. Histórico pesquisável (ignora acentos), favoritos e downloads com progresso, cancelamento e "Mostrar no Finder" |
+| **Página** | Busca com contagem de resultados, zoom de 25% a 500% por guia, impressão nativa e visualizador de PDF. Menu de contexto em português para links, imagens, seleção e campos de texto, com sugestões de ortografia no idioma do macOS. Vídeos em tela cheia ocupam a tela; `Esc` sai |
+| **Permissões** | Câmera, microfone, tela inteira, localização, área de transferência e vários downloads pedem confirmação. Respostas lembradas por site aparecem nos Ajustes e podem ser esquecidas |
+| **Aparência** | Temas sistema, claro e escuro. Transparência opcional do macOS nas barras e painéis; a página fica num cartão opaco |
 | **Recuperação** | Cópia anterior validada dos dados locais, recuperação de JSON corrompido e recarga após falha do renderer |
-| **Memória** | Descarte manual ou automático que preserva a aba ativa, abas carregando e, por padrão, as fixadas |
-| **Ferramentas** | DevTools do Chromium em janela própria |
+| **Memória** | Descarte manual ou automático que preserva a guia ativa, guias carregando e, por padrão, as fixadas |
+| **Ferramentas** | DevTools do Chromium num painel à direita da página, por guia, com largura ajustável. "Inspecionar" abre o elemento clicado |
 
 ## Começando
 
@@ -88,15 +88,15 @@ LUME_PROFILE_DIR="$(mktemp -d /tmp/lume-profile.XXXXXX)" ./dist/Lume.app/Content
 | Atalho | Ação |
 | :-- | :-- |
 | `⌘L` | Focar a barra de endereço |
-| `⌘T` · `⌘W` · `⌘⇧T` | Nova aba · fechar aba · reabrir aba fechada |
-| `⌘⇧]` · `⌘⇧[` | Próxima aba · aba anterior |
+| `⌘T` · `⌘W` · `⌘⇧T` | Nova guia · fechar guia · reabrir guia fechada |
+| `⌘⇧]` · `⌘⇧[` | Próxima guia · guia anterior |
 | `⌘[` · `⌘]` · `⌘R` | Voltar · avançar · recarregar |
 | `⌘F` · `⌘G` · `⌘⇧G` · `Esc` | Buscar na página · próximo · anterior · fechar busca |
 | `⌘+` · `⌘-` · `⌘0` | Ampliar · reduzir · tamanho real |
-| `⌘D` | Adicionar ou remover favorito |
+| `⌘D` | Favoritar a página e escolher nome e pasta |
 | `⌘Y` · `⌘⇧B` · `⌘⇧J` | Histórico · favoritos · downloads |
-| `⌘K` | Paleta de comandos |
 | `⌘⇧S` · `⌘⇧D` | Barra lateral · alternar tema |
+| `⌃⌘F` | Entrar ou sair da tela cheia |
 | `⌥⌘I` · `⌘P` · `⌘,` | DevTools · imprimir · ajustes |
 
 ## Testes
@@ -110,7 +110,7 @@ python3 scripts/reliability.py  # reinício, persistência e recuperação após
 | Suíte | Cobre |
 | :-- | :-- |
 | `test.sh` | Normalização de URLs, ciclo de vida e descarte, fechamento assíncrono e `beforeunload`, sessão, migração, biblioteca, busca, zoom, popups e downloads |
-| `smoke.sh` | Renderização real, voltar e avançar, múltiplas abas, descarte confirmado pelo motor, recriação, espaços e temas. Relatório em `.build/smoke-report.json` |
+| `smoke.sh` | Renderização real, voltar e avançar, múltiplas guias, descarte confirmado pelo motor, recriação, favoritos e temas. Relatório em `.build/smoke-report.json` |
 | `reliability.py` | Cookie HttpOnly e `localStorage` após reinício, busca e zoom reais, falha de rede, crash do renderer, WebRTC sintético e recuperação após SIGKILL. Relatório em `.build/reliability-report.json` |
 
 Todos os testes de integração usam perfis temporários e um servidor de fixtures em `127.0.0.1`. As APIs de diagnóstico só existem com a flag de teste e a origem loopback configurada.
@@ -119,8 +119,8 @@ Todos os testes de integração usam perfis temporários e um servidor de fixtur
 
 ```mermaid
 flowchart LR
-    UI["<b>UI</b><br/>AppKit: janela, paleta,<br/>biblioteca, ajustes"]
-    Core["<b>Core</b><br/>BrowserStore: abas, espaços,<br/>sessão, histórico, política"]
+    UI["<b>UI</b><br/>AppKit: janela, DevTools,<br/>biblioteca, ajustes"]
+    Core["<b>Core</b><br/>BrowserStore: guias, favoritos,<br/>sessão, histórico, política"]
     Engine["<b>Engine</b><br/>CEFEngine (Swift) e<br/>ponte Objective-C++"]
     CEF["<b>Chromium</b><br/>CEF + helpers<br/>com sandbox"]
     UI -- "intenções" --> Core
@@ -132,14 +132,14 @@ flowchart LR
 
 - **Core não conhece o CEF.** O contrato `BrowserEngine` expõe criação de views, navegação, histórico, áudio, busca, zoom, impressão e downloads. Os eventos voltam como `BrowserEvent`.
 - **Tipos do Chromium não atravessam a ponte.** `CefRefPtr`, handlers e detalhes de processo ficam em Objective-C++; o Swift só enxerga Foundation e AppKit.
-- **Criar e fechar páginas é assíncrono.** Uma aba só é removida ou descartada depois que o motor confirma o fechamento, respeitando diálogos `beforeunload`.
+- **Criar e fechar páginas é assíncrono.** Uma guia só é removida ou descartada depois que o motor confirma o fechamento, respeitando diálogos `beforeunload`.
 - **Um único loop principal.** `CefRunMessageLoop` roda na thread principal integrado ao `NSApplication`.
 
-### Ciclo de vida das abas
+### Ciclo de vida das guias
 
 | Estado | Significado |
 | :-- | :-- |
-| `active` | Aba selecionada, com página residente |
+| `active` | Guia selecionada, com página residente |
 | `warm` | Página residente em segundo plano; scripts continuam rodando |
 | `discarded` | Sem página residente; a URL recarrega ao selecionar |
 | `frozen` | Reservado; o motor atual não congela páginas |
@@ -164,9 +164,10 @@ Tudo fica em `~/Library/Application Support/Lume`:
 
 | Arquivo | Conteúdo |
 | :-- | :-- |
-| `session.json` | Abas, espaços, seleção e abas fechadas recentemente |
-| `settings.json` | Tema, barra lateral, busca e política de memória |
-| `library.json` | Histórico, favoritos e registros de downloads |
+| `session.json` | Guias, seleção e guias fechadas recentemente |
+| `settings.json` | Tema, transparência, barra lateral, exibição dos favoritos, busca, política de memória e permissões lembradas por site |
+| `library.json` | Histórico, favoritos, pastas de favoritos e registros de downloads |
+| `favicons/` | Ícones dos sites favoritados, em PNG. Remover o favorito apaga o ícone |
 | `Chromium/` | Perfil do motor: cookies, cache e `chromium.log` |
 
 Os JSONs são gravados com substituição atômica e permissão `0600`, com uma cópia `.backup.json` validada. Eles contêm URLs e títulos em texto legível e não são criptografados. Limpar o histórico também o remove das cópias de recuperação. A busca padrão é o DuckDuckGo.
@@ -176,11 +177,12 @@ Os JSONs são gravados com substituição atômica e permissão `0600`, com uma 
 > [!IMPORTANT]
 > O Lume é experimental. Não há distribuição pública: o build gera um app local com assinatura ad hoc e hardened runtime, sem Developer ID nem notarização.
 
-- **Descartar uma aba recarrega a página.** DOM, formulários não salvos e o histórico voltar/avançar daquela instância se perdem.
+- **Sem H.264, AAC e HEVC.** O CEF distribuído pela Spotify vem sem codecs proprietários: vídeos MP4 de sites como X, Instagram e Twitch não tocam. VP9, AV1, Opus e MP3 funcionam. Resolver exige compilar o CEF com `proprietary_codecs=true`, o que pede mais de 100 GB livres e bem mais que 8 GB de RAM. Também não há DRM (Widevine).
+- **Sem notificações de sites.** O estilo Alloy do CEF não as exibe, então o pedido é sempre recusado.
+- **Descartar uma guia recarrega a página.** DOM, formulários não salvos e o histórico voltar/avançar daquela instância se perdem.
 - **Sem congelamento de páginas.** O estado `frozen` existe no modelo, mas o motor não o suporta.
 - **Sem extensões do Chrome** e sem integração de IA; existe apenas o contrato para uma decisão futura.
-- **Espaços não isolam identidade.** Todos compartilham cookies e armazenamento.
-- **Economia de memória não medida.** Contar abas descartadas não comprova RAM ou bateria economizadas.
+- **Economia de memória não medida.** Contar guias descartadas não comprova RAM ou bateria economizadas.
 
 Validado em um Apple M1 com 8 GB de RAM.
 

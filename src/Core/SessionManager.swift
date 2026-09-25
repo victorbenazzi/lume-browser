@@ -1,15 +1,17 @@
 import Foundation
 import Darwin
 
+/// The tab list order is the sidebar order.
 struct BrowserSession: Codable {
-    var version: Int = 2
+    var version: Int = 3
     var tabs: [Tab]
-    var workspaces: [Workspace]
     var activeTabID: UUID?
-    var selectedWorkspaceID: UUID?
     var closedTabs: [ClosedTab] = []
 
-    private enum CodingKeys: String, CodingKey { case version, tabs, workspaces, activeTabID, selectedWorkspaceID, closedTabs }
+    private enum CodingKeys: String, CodingKey { case version, tabs, activeTabID, closedTabs }
+    /// Versions 1 and 2 grouped tabs in workspaces, each with its own tab order.
+    private enum LegacyKeys: String, CodingKey { case workspaces }
+    private struct LegacyWorkspace: Decodable { var tabs: [UUID]? }
 }
 
 extension BrowserSession {
@@ -17,27 +19,37 @@ extension BrowserSession {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
         tabs = try values.decode([Tab].self, forKey: .tabs)
-        workspaces = try values.decode([Workspace].self, forKey: .workspaces)
         activeTabID = try values.decodeIfPresent(UUID.self, forKey: .activeTabID)
-        selectedWorkspaceID = try values.decodeIfPresent(UUID.self, forKey: .selectedWorkspaceID)
         closedTabs = try values.decodeIfPresent([ClosedTab].self, forKey: .closedTabs) ?? []
+        // Tabs from former workspaces join a single list, workspace after workspace.
+        let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+        if let workspaces = try legacy.decodeIfPresent([LegacyWorkspace].self, forKey: .workspaces) {
+            let order = Dictionary(workspaces.flatMap { $0.tabs ?? [] }.enumerated().map { ($1, $0) }) { first, _ in first }
+            tabs = tabs.enumerated()
+                .sorted { (order[$0.element.id] ?? Int.max, $0.offset) < (order[$1.element.id] ?? Int.max, $1.offset) }
+                .map(\.element)
+        }
     }
 }
 
+/// Bookmarks are in sidebar order. Version 1 kept them newest first.
 struct BrowserLibrary: Codable {
-    var version: Int = 1
+    var version: Int = 2
     var history: [HistoryEntry] = []
     var bookmarks: [Bookmark] = []
+    var folders: [BookmarkFolder] = []
     var downloads: [BrowserDownload] = []
 }
 
 extension BrowserLibrary {
-    private enum CodingKeys: String, CodingKey { case version, history, bookmarks, downloads }
+    private enum CodingKeys: String, CodingKey { case version, history, bookmarks, folders, downloads }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
         history = try values.decodeIfPresent([HistoryEntry].self, forKey: .history) ?? []
         bookmarks = try values.decodeIfPresent([Bookmark].self, forKey: .bookmarks) ?? []
+        if version == 1 { bookmarks.reverse() }
+        folders = try values.decodeIfPresent([BookmarkFolder].self, forKey: .folders) ?? []
         downloads = try values.decodeIfPresent([BrowserDownload].self, forKey: .downloads) ?? []
     }
 }
@@ -159,7 +171,7 @@ final class SessionManager {
     init(directory: URL) {
         self.directory = directory
         file = LocalJSONFile(url: directory.appendingPathComponent("session.json")) { session in
-            guard (1...2).contains(session.version) else { throw PersistenceError.unsupportedVersion(session.version) }
+            guard (1...3).contains(session.version) else { throw PersistenceError.unsupportedVersion(session.version) }
         }
     }
 
@@ -181,6 +193,15 @@ final class SettingsStore {
         var settings = try file.read() ?? BrowserSettings()
         settings.memoryPolicy = settings.memoryPolicy.validated
         if !NavigationController().isSafeSearchURL(settings.searchURL) { settings.searchURL = NavigationController.defaultSearchURL }
+        // One decision per origin and permission, the latest winning. Unknown or malformed entries are dropped.
+        var seen = Set<String>()
+        settings.sitePermissions = settings.sitePermissions.reversed().compactMap { saved -> SitePermissionDecision? in
+            guard saved.permission.isValid, let origin = NavigationController.origin(of: saved.origin),
+                  seen.insert(origin + " " + saved.permission.rawValue).inserted else { return nil }
+            var decision = saved
+            decision.origin = origin
+            return decision
+        }.reversed()
         return settings
     }
 
@@ -192,7 +213,7 @@ final class LibraryStore {
     var recoveryMessage: String? { file.recoveryMessage }
     init(directory: URL) {
         file = LocalJSONFile(url: directory.appendingPathComponent("library.json")) { library in
-            guard library.version == 1 else { throw PersistenceError.unsupportedVersion(library.version) }
+            guard (1...2).contains(library.version) else { throw PersistenceError.unsupportedVersion(library.version) }
         }
     }
     func load() throws -> BrowserLibrary { try file.read() ?? BrowserLibrary() }
