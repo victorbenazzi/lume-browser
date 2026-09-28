@@ -34,13 +34,14 @@
 - **Nativo de verdade.** Janela, barra lateral, painel de DevTools e preferências são AppKit. Nada de Electron ou React.
 - **Chromium completo.** O CEF traz o motor, o modelo multiprocesso e a sandbox do Chromium, com helpers dedicados.
 - **Memória sob seu controle.** Guias podem ser descartadas de verdade, liberando a instância da página. O descarte automático é opcional e começa desligado.
-- **Local por padrão.** Sessão, histórico e favoritos ficam neste Mac. Sem telemetria, sem conta, sem IA ativa.
+- **Local por padrão.** Sessão, histórico e favoritos ficam neste Mac. Sem telemetria, sem conta, sem IA ativa. A única saída opcional são as sugestões do buscador enquanto você digita uma busca, que se desligam nos Ajustes.
 
 ## Recursos
 
 | Área | O que já funciona |
 | :-- | :-- |
 | **Navegação** | URLs HTTP/HTTPS e busca na mesma barra. `localhost` usa HTTP. Protocolos perigosos (`javascript:`, `data:`, `file:`) são recusados. Links `mailto:`, `tel:`, `zoommtg:` e outros abrem o app do Mac depois de uma confirmação. Arquivos gerados pela página (`blob:`) abrem numa guia. Login HTTP básico e de proxy com diálogo nativo |
+| **Barra de endereço** | Sugestões enquanto você digita, como no Chrome: completa o endereço no próprio campo (`gi` vira `github.com`), mostra histórico, favoritos, guias abertas ("Ir para a guia"), buscas feitas antes e sugestões do buscador. Tudo local responde na mesma tecla, em menos de 1 ms com 5.000 visitas; as sugestões do buscador entram por baixo, sem mexer no que já está na tela |
 | **Guias e favoritos** | Guias fixadas, som por guia e reabertura das últimas 25 guias fechadas. Favoritos na barra lateral, em lista ou em blocos (escolha nos Ajustes), com pastas de ícone personalizado e favicon dos sites. Arraste para reordenar ou soltar numa pasta; clique direito para renomear ou apagar |
 | **Biblioteca** | Abre numa guia própria, como os Ajustes. Histórico pesquisável (ignora acentos), favoritos e downloads com progresso, cancelamento e "Mostrar no Finder" |
 | **Página** | Busca com contagem de resultados, zoom de 25% a 500% por guia, impressão nativa e visualizador de PDF. Menu de contexto em português para links, imagens, seleção e campos de texto, com sugestões de ortografia no idioma do macOS. Vídeos em tela cheia ocupam a tela; `Esc` sai |
@@ -88,6 +89,8 @@ LUME_PROFILE_DIR="$(mktemp -d /tmp/lume-profile.XXXXXX)" ./dist/Lume.app/Content
 | Atalho | Ação |
 | :-- | :-- |
 | `⌘L` | Focar a barra de endereço |
+| `↑` `↓` ou `Tab` · `↩` · `Esc` | Percorrer as sugestões · abrir · voltar ao texto digitado e depois fechar a lista |
+| `⇧⌦` (`⇧fn⌫`) | Remover do histórico a página sugerida |
 | `⌘T` · `⌘W` · `⌘⇧T` | Nova guia · fechar guia · reabrir guia fechada |
 | `⌘⇧]` · `⌘⇧[` | Próxima guia · guia anterior |
 | `⌘[` · `⌘]` · `⌘R` | Voltar · avançar · recarregar |
@@ -109,7 +112,7 @@ python3 scripts/reliability.py  # reinício, persistência e recuperação após
 
 | Suíte | Cobre |
 | :-- | :-- |
-| `test.sh` | Normalização de URLs, ciclo de vida e descarte, fechamento assíncrono e `beforeunload`, sessão, migração, biblioteca, busca, zoom, popups e downloads |
+| `test.sh` | Normalização de URLs, ciclo de vida e descarte, fechamento assíncrono e `beforeunload`, sessão, migração, biblioteca, busca, zoom, popups, downloads e sugestões da barra de endereço, com uma medição sobre 5.000 visitas |
 | `smoke.sh` | Renderização real, voltar e avançar, múltiplas guias, descarte confirmado pelo motor, recriação, favoritos e temas. Relatório em `.build/smoke-report.json` |
 | `reliability.py` | Cookie HttpOnly e `localStorage` após reinício, busca e zoom reais, falha de rede, crash do renderer, WebRTC sintético e recuperação após SIGKILL. Relatório em `.build/reliability-report.json` |
 
@@ -165,12 +168,12 @@ Tudo fica em `~/Library/Application Support/Lume`:
 | Arquivo | Conteúdo |
 | :-- | :-- |
 | `session.json` | Guias, seleção e guias fechadas recentemente |
-| `settings.json` | Tema, transparência, barra lateral, exibição dos favoritos, busca, política de memória e permissões lembradas por site |
-| `library.json` | Histórico, favoritos, pastas de favoritos e registros de downloads |
-| `favicons/` | Ícones dos sites favoritados, em PNG. Remover o favorito apaga o ícone |
+| `settings.json` | Tema, transparência, barra lateral, exibição dos favoritos, busca e suas sugestões, política de memória e permissões lembradas por site |
+| `library.json` | Histórico (com a marca das visitas digitadas na barra), favoritos, pastas de favoritos e registros de downloads |
+| `favicons/` | Ícones dos sites favoritados e visitados, em PNG. Limpar o histórico ou remover o favorito apaga os que ficaram sem uso |
 | `Chromium/` | Perfil do motor: cookies, cache e `chromium.log` |
 
-Os JSONs são gravados com substituição atômica e permissão `0600`, com uma cópia `.backup.json` validada. Eles contêm URLs e títulos em texto legível e não são criptografados. Limpar o histórico também o remove das cópias de recuperação. A busca padrão é o DuckDuckGo.
+Os JSONs são gravados com substituição atômica e permissão `0600`, com uma cópia `.backup.json` validada. Eles contêm URLs e títulos em texto legível e não são criptografados. Limpar o histórico também o remove das cópias de recuperação. A busca padrão é o DuckDuckGo. Com as sugestões ligadas (padrão), o texto de uma busca sendo digitada vai ao DuckDuckGo sem cookies; endereços e páginas do Lume nunca são enviados.
 
 ## Limitações
 

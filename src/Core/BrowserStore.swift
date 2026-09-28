@@ -9,8 +9,8 @@ final class BrowserStore {
     private(set) var settings = BrowserSettings()
     private(set) var persistenceError: String?
     private(set) var persistenceRecoveryMessage: String?
-    private(set) var history: [HistoryEntry] = []
-    private(set) var bookmarks: [Bookmark] = []
+    private(set) var history: [HistoryEntry] = [] { didSet { autocompleteStale = true } }
+    private(set) var bookmarks: [Bookmark] = [] { didSet { autocompleteStale = true } }
     private(set) var bookmarkFolders: [BookmarkFolder] = []
     private(set) var downloads: [BrowserDownload] = []
     private(set) var findMatchCount: Int = 0
@@ -28,6 +28,10 @@ final class BrowserStore {
     private let favicons: FaviconStore
     private let resources = ResourceManager()
     private let lifecycle = TabLifecycleManager()
+    private let autocompleteIndex = AutocompleteIndex()
+    /// History or favorites changed since the index was built.
+    private var autocompleteStale = true
+    private lazy var searchSuggestions = SearchSuggestions()
     private enum CloseIntent { case remove, discard, quit }
     private struct PendingNavigation {
         let requestedURL: String?
@@ -42,6 +46,8 @@ final class BrowserStore {
         var navigation: PendingNavigation?
         var visitPending = false
         var lastVisitID: UUID?
+        /// The navigation came from the address bar, so its visit counts as typed.
+        var typedVisit = false
     }
     private var runtime: [UUID: TabRuntime] = [:]
     /// Tabs whose DevTools is open. Chromium closes it with the page, so it is never saved.
@@ -112,6 +118,11 @@ final class BrowserStore {
         }
         resources.onEvaluate = { [weak self] pressure in self?.evaluateResources(pressure) }
         engine.setPermissionPolicy(self)
+        // Hosts that aged out of history lose their icon, once the window is up.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !self.shuttingDown else { return }
+            self.favicons.prune(keeping: self.faviconURLs)
+        }
         if let id = activeTabID { selectTab(id) }
         else { newTab() }
     }
@@ -224,25 +235,128 @@ final class BrowserStore {
         else { newTab(url: page.rawValue) }
     }
 
-    func navigate(_ input: String) {
+    /// `typed` marks text entered in the address bar. An address typed there weighs more in its suggestions, as in Chrome.
+    func navigate(_ input: String, typed: Bool = false) {
         if let page = InternalPage(url: input) { openInternalPage(page); return }
         let destination: String
         do { destination = try navigation.normalize(input, searchURL: settings.searchURL) }
         catch { reportNavigationError(error); return }
+        load(destination, typedAddress: typed && navigation.isAddress(input))
+    }
+
+    /// Searches in the current tab, even for text that looks like an address.
+    func search(_ text: String) {
+        guard let destination = try? navigation.search(String(text.prefix(1_000)), searchURL: settings.searchURL) else { return }
+        load(destination, typedAddress: false)
+    }
+
+    private func load(_ destination: String, typedAddress: Bool) {
         guard let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { newTab(url: destination); return }
+        let id = tabs[index].id
         if tabs[index].internalPage != nil {
             // Leaving a Lume page turns the tab into a site with its own engine page.
             tabs[index].url = destination
             tabs[index].title = title(for: destination)
             tabs[index].page = PageState()
-            selectTab(tabs[index].id)
+            selectTab(id)
+            runtime[id]?.typedVisit = typedAddress
             return
         }
-        beginNavigation(tabs[index].id, requestedURL: destination)
+        beginNavigation(id, requestedURL: destination)
+        runtime[id]?.typedVisit = typedAddress
         stopFinding()
-        engine.navigate(tabID: tabs[index].id, url: destination)
+        engine.navigate(tabID: id, url: destination)
         changed(persistImmediately: true)
     }
+
+    // MARK: Address bar suggestions
+
+    /// Rows for the address bar as the user types. Local rows are computed at once; `suggestions` are the search engine's
+    /// latest answer, which the caller passes back in as it arrives.
+    func autocomplete(_ input: String, allowInline: Bool, suggestions: [String] = []) -> AutocompleteResult {
+        prepareAutocomplete()
+        return autocompleteIndex.complete(input, allowInline: allowInline, openTabs: tabs.filter { $0.id != activeTabID },
+                                          suggestions: suggestions, expectsSuggestions: suggestsSearches, navigation: navigation)
+    }
+
+    /// Builds the index when history changed, as the address field gains focus, before the first keystroke needs it.
+    func prepareAutocomplete() {
+        guard autocompleteStale || Date().timeIntervalSince(autocompleteIndex.builtAt) > 1_800 else { return }
+        autocompleteIndex.rebuild(history: history, bookmarks: bookmarks, searchURL: settings.searchURL)
+        autocompleteStale = false
+    }
+
+    /// The setting is on and Lume knows where the engine answers.
+    var suggestsSearches: Bool {
+        settings.searchSuggestions && SearchSuggestions.endpoint(searchURL: settings.searchURL, query: "") != nil
+    }
+
+    func setSearchSuggestions(_ enabled: Bool) {
+        settings.searchSuggestions = enabled
+        if !enabled { searchSuggestions.cancelPending() }
+        changed(persistImmediately: true)
+    }
+
+    /// Opens the connection to the engine as the field gains focus. Nothing typed is sent.
+    func warmUpSearchSuggestions() {
+        if suggestsSearches { searchSuggestions.warmUp(searchURL: settings.searchURL) }
+    }
+
+    /// The engine's earlier answer for the text, if it gave one this session.
+    func cachedSearchSuggestions(for text: String) -> [String]? {
+        guard let query = suggestionQuery(text) else { return nil }
+        return searchSuggestions.cached(query, searchURL: settings.searchURL)
+    }
+
+    /// Asks the engine about a search being typed. Addresses and Lume pages are never sent.
+    func requestSearchSuggestions(for text: String, completion: @escaping (String, [String]) -> Void) {
+        guard let query = suggestionQuery(text), searchSuggestions.cached(query, searchURL: settings.searchURL) == nil else {
+            searchSuggestions.cancelPending()
+            return
+        }
+        searchSuggestions.request(query, searchURL: settings.searchURL, completion: completion)
+    }
+
+    private func suggestionQuery(_ text: String) -> String? {
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard suggestsSearches, !query.isEmpty, query.count <= 200, !navigation.isAddress(query) else { return nil }
+        return query
+    }
+
+    /// Opens what a row of the address bar's list points to.
+    func open(_ destination: AutocompleteDestination) {
+        switch destination {
+        case .input(let text): navigate(text, typed: true)
+        case .url(let url): navigate(url, typed: true)
+        case .search(let text): search(text)
+        case .tab(let id): selectTab(id)
+        case .internalPage(let page): openInternalPage(page)
+        }
+    }
+
+    /// Forgets every visit to the address, as Shift+Delete does on a suggestion. The recovery copy forgets it too.
+    func removeHistory(url: String) {
+        guard history.contains(where: { $0.url == url }) else { return }
+        history.removeAll { $0.url == url }
+        favicons.prune(keeping: faviconURLs)
+        libraryDirty = true
+        do {
+            try libraryStore.save(library, purgePrevious: true)
+            libraryDirty = false
+            persistenceError = nil
+        } catch { persistenceError = error.localizedDescription }
+        onChange?()
+    }
+
+    /// The icon of a site, from an open tab when one shows it, else as saved from an earlier visit.
+    func favicon(forURL url: String) -> NSImage? {
+        let key = FaviconStore.key(for: url)
+        if let live = tabs.first(where: { $0.page.faviconImage != nil && FaviconStore.key(for: $0.url) == key })?.page.faviconImage { return live }
+        return favicons.image(for: url)
+    }
+
+    /// Icons stay for hosts still bookmarked or in history.
+    private var faviconURLs: [String] { bookmarks.map(\.url) + Set(history.map(\.url)) }
 
     func back() {
         if let tab = activeTab, tab.page.canGoBack { beginNavigation(tab.id); engine.goBack(tabID: tab.id) }
@@ -320,7 +434,7 @@ final class BrowserStore {
 
     func removeBookmark(_ id: UUID) {
         bookmarks.removeAll { $0.id == id }
-        favicons.prune(keeping: bookmarks.map(\.url))
+        favicons.prune(keeping: faviconURLs)
         libraryChanged()
     }
 
@@ -394,6 +508,7 @@ final class BrowserStore {
 
     func clearHistory() {
         history.removeAll()
+        favicons.prune(keeping: faviconURLs)
         libraryDirty = true
         do {
             try libraryStore.save(library, purgePrevious: true)
@@ -513,8 +628,10 @@ final class BrowserStore {
             // A download for an icon the page has since replaced is stale.
             guard let tab = tabs.first(where: { $0.id == id }), tab.page.favicon == url else { return }
             updateTab(id) { $0.page.faviconImage = image }
-            if let image, bookmarks.contains(where: { FaviconStore.key(for: $0.url) == FaviconStore.key(for: tab.url) }) {
-                favicons.save(image, for: tab.url)
+            // Kept for the favorites and for the address bar's suggestions. Clearing history deletes them.
+            if let image, isWebURL(tab.url) {
+                let bookmarked = bookmarks.contains { FaviconStore.key(for: $0.url) == FaviconStore.key(for: tab.url) }
+                favicons.save(image, for: tab.url, once: !bookmarked)
             }
             changed()
         case .audio(let id, let playing):
@@ -662,6 +779,7 @@ final class BrowserStore {
 
     private func didFail(_ id: UUID, message: String) {
         runtime[id]?.visitPending = false
+        runtime[id]?.typedVisit = false
         runtime[id]?.navigation = nil
         if fullscreenTabID == id { fullscreenTabID = nil }
         updateTab(id) {
@@ -723,6 +841,7 @@ final class BrowserStore {
         // to the committed page rather than to an abandoned attempt.
         let previous = runtime[id]?.navigation?.previousStatus ?? tab.page.status
         runtime[id, default: TabRuntime()].navigation = PendingNavigation(requestedURL: requestedURL, previousStatus: previous)
+        runtime[id]?.typedVisit = false
         // CEF can coalesce loading=true across consecutive navigations. Clear
         // the previous attempt's error before dispatch.
         updateTab(id) { $0.page.startLoading() }
@@ -780,7 +899,8 @@ final class BrowserStore {
         guard runtime[id]?.visitPending == true else { return }
         runtime[id]?.visitPending = false
         guard let tab = tabs.first(where: { $0.id == id }), tab.page.status == .ready, isWebURL(tab.url) else { return }
-        let entry = HistoryEntry(url: tab.url, title: tab.title)
+        let entry = HistoryEntry(url: tab.url, title: tab.title, typed: runtime[id]?.typedVisit == true ? true : nil)
+        runtime[id]?.typedVisit = false
         history.insert(entry, at: 0)
         if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
         runtime[id]?.lastVisitID = entry.id

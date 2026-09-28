@@ -1,11 +1,14 @@
 import AppKit
 
-/// Site icons of bookmarked hosts, kept on disk so favorites show them before their pages open again.
+/// Site icons of bookmarked and visited hosts, kept on disk so favorites and the address bar's suggestions show them
+/// before their pages open again.
 /// It is a cache: a failed read or write only means the fallback symbol is shown.
 final class FaviconStore {
     private let directory: URL
     private var images: [String: NSImage] = [:]
     private var missing = Set<String>()
+    /// Hosts already written this session, so browsing does not rewrite an icon on every page.
+    private var written = Set<String>()
 
     init(directory: URL) {
         self.directory = directory.appendingPathComponent("favicons", isDirectory: true)
@@ -20,11 +23,14 @@ final class FaviconStore {
         return image
     }
 
-    func save(_ image: NSImage, for url: String) {
-        guard let key = Self.key(for: url), let tiff = image.tiffRepresentation,
-              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+    /// `once` keeps the file already written for the host this session, for icons saved while browsing.
+    func save(_ image: NSImage, for url: String, once: Bool = false) {
+        guard let key = Self.key(for: url) else { return }
         images[key] = image
         missing.remove(key)
+        guard !once || !written.contains(key), let tiff = image.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        written.insert(key)
         let manager = FileManager.default
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         if (try? png.write(to: file(for: key), options: .atomic)) != nil {
@@ -32,10 +38,11 @@ final class FaviconStore {
         }
     }
 
-    /// Deletes the icons of hosts that are no longer bookmarked.
+    /// Deletes the icons of hosts that are neither bookmarked nor in history.
     func prune(keeping urls: [String]) {
         let kept = Set(urls.compactMap(Self.key(for:)))
         images = images.filter { kept.contains($0.key) }
+        written.formIntersection(kept)
         guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
         for file in files where file.pathExtension == "png" && !kept.contains(file.deletingPathExtension().lastPathComponent) {
             try? FileManager.default.removeItem(at: file)

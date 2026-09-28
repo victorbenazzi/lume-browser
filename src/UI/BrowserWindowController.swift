@@ -7,7 +7,7 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     private let toolbar = LumeView()
     private let sidebar = LumeView()
     private let addressContainer = LumeView()
-    private let address = NSTextField()
+    private let address = AddressField()
     private let addressIcon = NSImageView()
     private let pageShadow = NSView()
     private let pageHost = LumeView()
@@ -33,6 +33,9 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     /// Tells a finished exit whether a newer placement replaced it.
     private var heroGeneration = 0
     private static let heroAnimationKey = "heroTransition"
+    /// The bear's size on the new tab page, and where the field starts below it.
+    private static let heroMark: CGFloat = 72
+    private static let heroFieldTop: CGFloat = heroMark + 16
     private let errorState = LumeView()
     private let errorTitle = lumeLabel("Não foi possível abrir esta página", size: 20, weight: .medium)
     private let errorDescription = NSTextField(wrappingLabelWithString: "")
@@ -56,6 +59,15 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     /// The click that dismisses the favorite popover also reaches the star, which must not reopen it.
     private var bookmarkPopoverClosedAt = Date.distantPast
     private lazy var findBar = FindBar(store: store)
+    /// History, open guias and searches for what is typed, in a list that grows out of the field.
+    private lazy var suggestions = AddressSuggestions(store: store, field: address)
+    /// Edits the address field in place of the window's shared editor, so completions land after each keystroke.
+    private lazy var addressEditor: AddressFieldEditor = {
+        let editor = AddressFieldEditor()
+        editor.isFieldEditor = true
+        editor.onTyped = { [weak self] in self?.suggestions.typingEnded() }
+        return editor
+    }()
     private let zoomButton = NSButton()
     private var presentedTabID: UUID?
     private var presentedURL: String?
@@ -137,8 +149,9 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         root.addSubview(devToolsHost)
         root.addSubview(devToolsDivider)
         sidebar.wantsLayer = true
-        root.addSubview(toolbar)
         root.addSubview(findBar)
+        // The suggestion list goes between the page and the toolbar, so it can spread under the field it grows from.
+        root.addSubview(toolbar)
         // The page and DevTools are rounded cards. Clipping also rounds the web content drawn inside them.
         for (card, shadow) in [(pageHost, pageShadow), (devToolsHost, devToolsShadow)] {
             card.wantsLayer = true
@@ -173,7 +186,7 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
             guard let self, NSApp.keyWindow === self.window, event.keyCode == 53 else { return event }
             // With Alloy, Esc reaches the page unless Lume ends the page's fullscreen itself.
             if self.contentFullscreen { self.store.exitFullscreen(); return nil }
-            guard !self.findBar.isHidden else { return event }
+            guard !self.findBar.isHidden, !self.suggestions.isOpen else { return event }
             self.hideFind()
             return nil
         }
@@ -197,6 +210,9 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         address.target = self
         address.action = #selector(navigateAddress(_:))
         address.setAccessibilityLabel("Endereço e busca")
+        address.onFocus = { [weak self] in self?.suggestions.prepare() }
+        suggestions.onOpen = { [weak self] match in self?.openSuggestion(match) }
+        suggestions.onChange = { [weak self] in self?.suggestionsChanged() }
         // A square box and a symbol drawn at its own size: favicons scale down whole, symbols are never squeezed.
         addressIcon.imageScaling = .scaleProportionallyDown
         addressIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
@@ -245,6 +261,8 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         applyTheme()
         let activeTab = store.activeTab
         if presentedTabID != store.activeTabID || presentedURL != activeTab?.url {
+            // Suggestions belong to the page they were typed over.
+            if presentedTabID != store.activeTabID { suggestions.close() }
             findBar.isHidden = true
             findBar.clear()
             presentedTabID = store.activeTabID
@@ -381,15 +399,18 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         let hero = addressContainer.superview === newTabHero
         // A sinking field keeps the focused look it had when Enter was pressed.
         let focused = isEditingAddress || heroExiting
+        // With the list open, its card draws the field's surface, so both read as one piece.
+        let expanded = suggestions.isOpen
         let fieldPalette = hero ? LumePalette.current(for: window.effectiveAppearance) : palette
         let radius = hero ? LumeMetrics.heroFieldRadius : LumeMetrics.fieldRadius
         addressContainer.wantsLayer = true
         addressContainer.cornerRadius = radius
-        addressContainer.fillColor = focused || hero ? fieldPalette.elevated : fieldPalette.surface
+        addressContainer.fillColor = expanded ? .clear : focused || hero ? fieldPalette.elevated : fieldPalette.surface
         addressContainer.layer?.cornerRadius = radius
-        addressContainer.layer?.borderWidth = focused ? 1.5 : hero ? 1 / window.backingScaleFactor : 0
+        addressContainer.layer?.borderWidth = expanded ? 0 : focused ? 1.5 : hero ? 1 / window.backingScaleFactor : 0
         addressContainer.layer?.borderColor = focused ? palette.accent.withAlphaComponent(0.65).cgColor : fieldPalette.pageBorder.cgColor
-        addressContainer.layer?.shadowOpacity = hero ? 1 : 0
+        addressContainer.layer?.shadowOpacity = hero && !expanded ? 1 : 0
+        suggestions.list.apply(LumePalette.current(for: window.effectiveAppearance), hero: hero)
         addressContainer.layer?.shadowOffset = .zero
         addressContainer.layer?.shadowRadius = 10
         addressContainer.layer?.shadowColor = NSColor.black.withAlphaComponent(fieldPalette.isDark ? 0.32 : 0.07).cgColor
@@ -402,7 +423,10 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     private func refreshAddress() {
         let activeTab = store.activeTab
         if !isEditingAddress { address.stringValue = displayedAddress }
-        if addressInHero {
+        if let match = suggestions.selectedMatch, let image = suggestions.image(for: match) {
+            // The icon of the row Enter would open: a search, or the site's own.
+            addressIcon.image = image
+        } else if addressInHero {
             addressIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         } else if let tab = activeTab, tab.internalPage == nil, let favicon = store.favicon(for: tab) {
             // The site's icon, as in its tab. Lume pages show their symbol, and pages without an icon a globe.
@@ -423,6 +447,7 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     /// it then appears in the toolbar. Every other move is immediate: opening a tab or switching to one happens too often to animate.
     private func placeAddress(inHero hero: Bool) {
         guard hero != addressInHero else { return }
+        suggestions.close()
         addressInHero = hero
         heroGeneration += 1
         let generation = heroGeneration
@@ -512,16 +537,23 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     }
 
     /// The bear and the field sit a little above the middle of the card, where the eye settles.
+    /// The suggestion list lengthens the hero downward without moving the field.
     private func layoutNewTabPage() {
         let bounds = pageHost.bounds
         newTabPage.frame = bounds
         // A sinking hero rides the card as it settles, instead of being centered again on the way out.
         guard !heroExiting else { return }
-        let mark: CGFloat = 72
+        let mark = Self.heroMark
         let width = min(620, max(240, bounds.width - 96))
-        let height = mark + 16 + LumeMetrics.heroFieldHeight
-        newTabHero.frame = NSRect(x: round((bounds.width - width) / 2), y: max(24, round(bounds.height * 0.42 - height / 2)), width: width, height: height)
+        let height = Self.heroFieldTop + LumeMetrics.heroFieldHeight
+        let y = max(24, round(bounds.height * 0.42 - height / 2))
+        var list: CGFloat = 0
+        if suggestions.isOpen && suggestions.list.superview === newTabHero {
+            list = min(suggestions.list.contentHeight, max(LumeMetrics.heroFieldHeight, bounds.height - y - Self.heroFieldTop - 12))
+        }
+        newTabHero.frame = NSRect(x: round((bounds.width - width) / 2), y: y, width: width, height: max(height, Self.heroFieldTop + list))
         newTabMark.frame = NSRect(x: round((width - mark) / 2), y: 0, width: mark, height: mark)
+        if list > 0 { suggestions.list.frame = NSRect(x: 0, y: Self.heroFieldTop, width: width, height: list) }
     }
 
     /// The page takes the whole window, and the window the whole screen unless it already has it.
@@ -606,7 +638,7 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         if addressContainer.superview === newTabHero {
             // Larger by one proportion, with the star and zoom hidden: a blank page has neither.
             let height = LumeMetrics.heroFieldHeight
-            addressContainer.frame = NSRect(x: 0, y: newTabHero.bounds.height - height, width: newTabHero.bounds.width, height: height)
+            addressContainer.frame = NSRect(x: 0, y: Self.heroFieldTop, width: newTabHero.bounds.width, height: height)
             addressIcon.frame = NSRect(x: 15, y: 13, width: 18, height: 18)
             address.frame = NSRect(x: 43, y: 11, width: max(0, addressContainer.bounds.width - 59), height: 24)
         } else {
@@ -622,6 +654,12 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         if addressContainer.layer?.shadowOpacity ?? 0 > 0 {
             let radius = LumeMetrics.heroFieldRadius
             addressContainer.layer?.shadowPath = CGPath(roundedRect: addressContainer.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        }
+        if suggestions.isOpen && suggestions.list.superview === root {
+            // Under the toolbar's field, over the page, as far down as the window allows.
+            let field = root.convert(addressContainer.frame, from: toolbar)
+            let room = max(field.height, size.height - field.minY - LumeMetrics.pageInset)
+            suggestions.list.frame = NSRect(x: field.minX, y: field.minY, width: field.width, height: min(suggestions.list.contentHeight, room))
         }
         sidebarScroll.frame = NSRect(x: 8, y: 10, width: max(0, sidebarWidth - 16), height: max(0, sidebar.bounds.height - 60))
         let docWidth = max(0, sidebarWidth - 16)
@@ -822,9 +860,35 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
 
     private func createTab() { store.newTab(); focusAddress() }
 
+    /// The list sits where the field is: over the page under the toolbar, or inside the new tab page's hero.
+    /// Either way it goes below the field, which stays on top of the card that grows from it.
+    private func suggestionsChanged() {
+        let list = suggestions.list
+        if suggestions.isOpen {
+            let hero = addressContainer.superview === newTabHero
+            if hero && list.superview !== newTabHero { newTabHero.addSubview(list, positioned: .below, relativeTo: addressContainer) }
+            if !hero && list.superview !== root { root.addSubview(list, positioned: .below, relativeTo: toolbar) }
+        }
+        styleAddress()
+        refreshAddress()
+        layoutInterface()
+    }
+
+    private func openSuggestion(_ match: AutocompleteMatch) {
+        isEditingAddress = false
+        // Switching to an open guia leaves the new tab page at once; loading a page sinks the field into it.
+        if case .tab = match.destination {} else { heroExitRequested = true }
+        store.open(match.destination)
+        heroExitRequested = false
+        window?.makeFirstResponder(displayedPageView ?? root)
+        applyTheme()
+    }
+
+    func controlTextDidChange(_ obj: Notification) { suggestions.textDidChange() }
     func controlTextDidBeginEditing(_ obj: Notification) { isEditingAddress = true; applyTheme() }
-    func controlTextDidEndEditing(_ obj: Notification) { isEditingAddress = false; applyTheme() }
+    func controlTextDidEndEditing(_ obj: Notification) { isEditingAddress = false; suggestions.endEditing(); applyTheme() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if suggestions.handle(selector) { return true }
         if selector == #selector(NSResponder.cancelOperation(_:)) {
             address.stringValue = displayedAddress
             window?.makeFirstResponder(displayedPageView ?? root)
@@ -839,7 +903,7 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
         if addressInHero && input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
         isEditingAddress = false
         heroExitRequested = true
-        store.navigate(input)
+        store.navigate(input, typed: true)
         heroExitRequested = false
         window?.makeFirstResponder(displayedPageView ?? root)
         applyTheme()
@@ -921,6 +985,11 @@ final class BrowserWindowController: NSWindowController, NSTextFieldDelegate, NS
     }
 
     func windowWillClose(_ notification: Notification) { store.saveSession() }
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        client as AnyObject? === address ? addressEditor : nil
+    }
+    /// Like Chrome, the list does not wait over another app or a dialog.
+    func windowDidResignKey(_ notification: Notification) { suggestions.close() }
 
     func windowWillEnterFullScreen(_ notification: Notification) { windowFullScreenTransition = true }
     func windowDidEnterFullScreen(_ notification: Notification) { windowFullScreenTransition = false; matchWindowFullScreen() }

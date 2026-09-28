@@ -36,6 +36,14 @@ struct NavigationController {
         return try search(value, searchURL: searchURL)
     }
 
+    /// Whether `normalize` reads the input as an address, valid or not, rather than as a search.
+    func isAddress(_ input: String) -> Bool {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty || value == "about:blank" { return true }
+        if explicitScheme(value) != nil && !isHostWithPort(value) { return true }
+        return !value.contains(where: { $0.isWhitespace }) && looksLikeHost(value)
+    }
+
     /// Always a search, even for text that looks like an address, as when searching a selection.
     func search(_ text: String, searchURL: String = defaultSearchURL) throws -> String {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)

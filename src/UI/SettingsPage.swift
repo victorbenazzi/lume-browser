@@ -16,6 +16,9 @@ final class SettingsPage: NSObject {
     private let translucency = NSSegmentedControl(labels: ["Alta", "Média", "Desligada"], trackingMode: .selectOne, target: nil, action: nil)
     private let favoritesLabel = lumeLabel("Favoritos na barra lateral", size: 13)
     private let favoritesLayout = NSSegmentedControl(labels: ["Lista", "Blocos"], trackingMode: .selectOne, target: nil, action: nil)
+    private let addressHeading = lumeLabel("Barra de endereço", size: 13, weight: .semibold)
+    private let suggestionsToggle = NSButton(checkboxWithTitle: "Mostrar sugestões do buscador enquanto digito", target: nil, action: nil)
+    private let suggestionsNote = NSTextField(wrappingLabelWithString: "O que você digita como busca vai para o buscador padrão, sem cookies, para trazer sugestões. Endereços e páginas do Lume nunca saem do Mac. Histórico, favoritos e guias abertas são sugeridos sempre, localmente.")
     private let performanceHeading = lumeLabel("Memória das guias", size: 13, weight: .semibold)
     private let automaticToggle = NSButton(checkboxWithTitle: "Descartar guias inativas automaticamente", target: nil, action: nil)
     private let pinnedToggle = NSButton(checkboxWithTitle: "Manter guias fixadas carregadas", target: nil, action: nil)
@@ -50,7 +53,7 @@ final class SettingsPage: NSObject {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         document.addSubview(content)
-        for control in [heading, appearanceHeading, theme, sidebarToggle, translucencyLabel, translucency, favoritesLabel, favoritesLayout, performanceHeading, automaticToggle, pinnedToggle, limitLabel, minutesLabel, limitField, minutesField, note, discardButton, permissionsHeading, permissionsNote, forgetAllButton, status] { content.addSubview(control) }
+        for control in [heading, appearanceHeading, theme, sidebarToggle, translucencyLabel, translucency, favoritesLabel, favoritesLayout, addressHeading, suggestionsToggle, suggestionsNote, performanceHeading, automaticToggle, pinnedToggle, limitLabel, minutesLabel, limitField, minutesField, note, discardButton, permissionsHeading, permissionsNote, forgetAllButton, status] { content.addSubview(control) }
         permissionsNote.font = .systemFont(ofSize: 12)
         forgetAllButton.bezelStyle = .rounded
         forgetAllButton.target = self
@@ -66,6 +69,9 @@ final class SettingsPage: NSObject {
         favoritesLayout.target = self
         favoritesLayout.action = #selector(changeFavoritesLayout)
         favoritesLayout.setAccessibilityLabel("Favoritos na barra lateral")
+        suggestionsToggle.target = self
+        suggestionsToggle.action = #selector(changeSuggestions)
+        suggestionsNote.font = .systemFont(ofSize: 12)
         automaticToggle.target = self
         automaticToggle.action = #selector(changePolicy)
         pinnedToggle.target = self
@@ -100,6 +106,7 @@ final class SettingsPage: NSObject {
         sidebarToggle.state = store.settings.sidebarVisible ? .on : .off
         translucency.selectedSegment = Translucency.allCases.firstIndex(of: store.settings.translucency) ?? 1
         favoritesLayout.selectedSegment = FavoritesLayout.allCases.firstIndex(of: store.settings.favoritesLayout) ?? 0
+        suggestionsToggle.state = store.settings.searchSuggestions ? .on : .off
         let policy = store.settings.memoryPolicy
         automaticToggle.state = policy.automaticDiscardEnabled ? .on : .off
         pinnedToggle.state = policy.keepPinnedTabsAlive ? .on : .off
@@ -112,8 +119,9 @@ final class SettingsPage: NSObject {
     func apply(_ palette: LumePalette) {
         self.palette = palette
         view.fillColor = palette.elevated
-        for label in [heading, appearanceHeading, translucencyLabel, favoritesLabel, performanceHeading, limitLabel, minutesLabel, permissionsHeading] { label.textColor = palette.textPrimary }
+        for label in [heading, appearanceHeading, translucencyLabel, favoritesLabel, addressHeading, performanceHeading, limitLabel, minutesLabel, permissionsHeading] { label.textColor = palette.textPrimary }
         note.textColor = palette.textSecondary
+        suggestionsNote.textColor = palette.textSecondary
         permissionsNote.textColor = palette.textSecondary
         status.textColor = store.persistenceError == nil ? palette.textMuted : palette.error
         rebuildPermissions()
@@ -193,17 +201,21 @@ final class SettingsPage: NSObject {
         translucency.frame = NSRect(x: 242, y: 152, width: 270, height: 28)
         favoritesLabel.frame = NSRect(x: 28, y: 196, width: 300, height: 20)
         favoritesLayout.frame = NSRect(x: 342, y: 192, width: 170, height: 28)
-        performanceHeading.frame = NSRect(x: 28, y: 252, width: 300, height: 20)
-        automaticToggle.frame = NSRect(x: 26, y: 287, width: 480, height: 24)
-        limitLabel.frame = NSRect(x: 28, y: 325, width: 360, height: 20)
-        limitField.frame = NSRect(x: 440, y: 322, width: 70, height: 24)
-        minutesLabel.frame = NSRect(x: 28, y: 359, width: 360, height: 20)
-        minutesField.frame = NSRect(x: 440, y: 356, width: 70, height: 24)
-        pinnedToggle.frame = NSRect(x: 26, y: 393, width: 480, height: 24)
-        note.frame = NSRect(x: 28, y: 428, width: 484, height: 60)
-        discardButton.frame = NSRect(x: 22, y: 498, width: 210, height: 32)
-        permissionsHeading.frame = NSRect(x: 28, y: 560, width: 300, height: 20)
-        permissionsNote.frame = NSRect(x: 28, y: 586, width: 484, height: 34)
+        addressHeading.frame = NSRect(x: 28, y: 252, width: 300, height: 20)
+        suggestionsToggle.frame = NSRect(x: 26, y: 287, width: 480, height: 24)
+        suggestionsNote.frame = NSRect(x: 28, y: 317, width: 484, height: 50)
+        let shift: CGFloat = 138
+        performanceHeading.frame = NSRect(x: 28, y: 252 + shift, width: 300, height: 20)
+        automaticToggle.frame = NSRect(x: 26, y: 287 + shift, width: 480, height: 24)
+        limitLabel.frame = NSRect(x: 28, y: 325 + shift, width: 360, height: 20)
+        limitField.frame = NSRect(x: 440, y: 322 + shift, width: 70, height: 24)
+        minutesLabel.frame = NSRect(x: 28, y: 359 + shift, width: 360, height: 20)
+        minutesField.frame = NSRect(x: 440, y: 356 + shift, width: 70, height: 24)
+        pinnedToggle.frame = NSRect(x: 26, y: 393 + shift, width: 480, height: 24)
+        note.frame = NSRect(x: 28, y: 428 + shift, width: 484, height: 60)
+        discardButton.frame = NSRect(x: 22, y: 498 + shift, width: 210, height: 32)
+        permissionsHeading.frame = NSRect(x: 28, y: 560 + shift, width: 300, height: 20)
+        permissionsNote.frame = NSRect(x: 28, y: 586 + shift, width: 484, height: 34)
         status.frame = NSRect(x: 28, y: statusY, width: 484, height: statusHeight)
     }
 
@@ -225,6 +237,10 @@ final class SettingsPage: NSObject {
         notice = nil
         guard FavoritesLayout.allCases.indices.contains(favoritesLayout.selectedSegment) else { return }
         store.setFavoritesLayout(FavoritesLayout.allCases[favoritesLayout.selectedSegment])
+    }
+    @objc private func changeSuggestions() {
+        notice = nil
+        store.setSearchSuggestions(suggestionsToggle.state == .on)
     }
     @objc private func changePolicy() {
         notice = nil

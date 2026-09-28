@@ -84,6 +84,9 @@ struct HistoryEntry: Identifiable, Codable {
     var url: String
     var title: String
     var visitedAt: Date = Date()
+    /// True when the address was typed or picked in the address bar, which the suggestions weigh more.
+    /// Nil otherwise, so ordinary visits add nothing to the file.
+    var typed: Bool? = nil
 }
 
 struct Bookmark: Identifiable, Codable {
@@ -220,6 +223,8 @@ struct BrowserSettings: Codable {
     var sitePermissions: [SitePermissionDecision] = []
     /// The DevTools panel beside the page keeps the width it was last dragged to.
     var devToolsWidth: Double = 440
+    /// The address bar asks the search engine for suggestions while the user types a search.
+    var searchSuggestions: Bool = true
 }
 
 struct EngineCapabilities {
@@ -331,7 +336,7 @@ extension MemoryPolicy {
 }
 
 extension BrowserSettings {
-    private enum CodingKeys: String, CodingKey { case theme, sidebarVisible, translucency = "translucencyLevel", favoritesLayout, favoritesCollapsed, memoryPolicy, searchURL, sitePermissions, devToolsWidth }
+    private enum CodingKeys: String, CodingKey { case theme, sidebarVisible, translucency = "translucencyLevel", favoritesLayout, favoritesCollapsed, memoryPolicy, searchURL, sitePermissions, devToolsWidth, searchSuggestions }
     private enum LegacyKeys: String, CodingKey { case translucency }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -346,5 +351,6 @@ extension BrowserSettings {
         searchURL = try values.decodeIfPresent(String.self, forKey: .searchURL) ?? NavigationController.defaultSearchURL
         sitePermissions = try values.decodeIfPresent([SitePermissionDecision].self, forKey: .sitePermissions) ?? []
         devToolsWidth = try values.decodeIfPresent(Double.self, forKey: .devToolsWidth) ?? 440
+        searchSuggestions = try values.decodeIfPresent(Bool.self, forKey: .searchSuggestions) ?? true
     }
 }

@@ -64,6 +64,9 @@ struct CoreTests {
         testDevTools()
         try testSitePermissions()
         testFavicons()
+        try testAutocomplete()
+        testAutocompleteIndex()
+        testSearchSuggestions()
         print("PASS: \(checks) core checks")
     }
 
@@ -816,6 +819,158 @@ struct CoreTests {
         expect(reloaded.sitePermissions.count == 1 && reloaded.permissionDecision(origin: "https://a.example", permission: .camera) == false,
                "Loading keeps the latest valid answer per site and drops malformed entries")
         reloaded.shutdown()
+    }
+
+    /// A committed, finished page load, as the engine reports it.
+    private static func visit(_ store: BrowserStore, _ engine: FakeEngine, _ input: String, title: String, typed: Bool = false) {
+        let id = store.activeTabID!
+        store.navigate(input, typed: typed)
+        let url = engine.navigated.last!.1
+        engine.onEvent?(.loading(id, true, false, false))
+        engine.onEvent?(.url(id, url))
+        engine.onEvent?(.title(id, title))
+        engine.onEvent?(.loading(id, false, true, false))
+    }
+
+    private static func testAutocomplete() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = FakeEngine()
+        let store = BrowserStore(engine: engine, dataDirectory: directory)
+        defer { store.shutdown() }
+        visit(store, engine, "github.com", title: "GitHub", typed: true)
+        visit(store, engine, "https://github.com/anthropics/claude-code", title: "Claude Code")
+        visit(store, engine, "https://example.com/cafe", title: "Café e ação")
+        visit(store, engine, "clima em são paulo", title: "clima em são paulo at DuckDuckGo", typed: true)
+        expect(store.history.first(where: { $0.url.hasPrefix("https://github.com") && $0.title == "GitHub" })?.typed == true,
+               "An address typed in the bar is recorded as typed")
+        expect(store.history.first?.typed == nil, "A typed search is not a typed address")
+        let saved = try LibraryStore(directory: directory).load()
+        expect(saved.history.contains { $0.typed == true } && saved.history.contains { $0.typed == nil }, "The typed mark persists and ordinary visits omit it")
+
+        let git = store.autocomplete("gi", allowInline: true)
+        expect(git.inlineCompletion == "thub.com", "A typed host completes inside the field")
+        expect(git.matches.first?.destination == .url("https://github.com"), "Enter goes to the completed host")
+        expect(git.matches.dropFirst().first?.kind == .typedSearch, "The typed text can still be searched right below")
+        expect(git.matches.contains { $0.url == "https://github.com/anthropics/claude-code" }, "Deeper pages of the host follow")
+        expect(store.autocomplete("gi", allowInline: false).inlineCompletion.isEmpty, "Deleting turns completion off")
+        expect(store.autocomplete("gi ", allowInline: true).inlineCompletion.isEmpty, "A space ends the address, so nothing completes")
+        expect(store.autocomplete("https://www.git", allowInline: true).inlineCompletion == "hub.com", "Scheme and www are skipped while completing")
+        expect(store.autocomplete("github.com/an", allowInline: true).inlineCompletion.isEmpty,
+               "A deep page visited once is not completed")
+
+        let accents = store.autocomplete("acao cafe", allowInline: true)
+        expect(accents.matches.contains { $0.url == "https://example.com/cafe" }, "Matching ignores accents and needs every word")
+        expect(!store.autocomplete("fe", allowInline: true).matches.contains { $0.url == "https://example.com/cafe" },
+               "Matches start at a word, not inside one")
+        expect(store.autocomplete("code", allowInline: true).matches.contains { $0.detail == "github.com/anthropics/claude-code" },
+               "A word in the path finds the page")
+
+        let search = store.autocomplete("clim", allowInline: true)
+        expect(search.matches.first?.kind == .typedSearch && search.wantsSuggestions, "A search reads as a search and wants suggestions")
+        expect(search.matches.contains { $0.kind == .pastSearch && $0.title == "clima em são paulo" }, "Earlier searches come back as searches")
+        expect(!search.matches.contains { $0.url?.contains("duckduckgo.com") == true }, "Result pages do not show as pages")
+        let suggested = store.autocomplete("clim", allowInline: true, suggestions: ["clima", "clima em são paulo", "clima amanhã", "https://clima.example"])
+        expect(suggested.matches.filter { $0.kind == .suggestion }.map(\.title) == ["clima", "clima amanhã"],
+               "Suggestions skip earlier searches and addresses")
+        expect(Array(suggested.matches.prefix(search.matches.count)) == search.matches, "Suggestions join below, so rows already shown stay put")
+
+        let address = store.autocomplete("example.com/c", allowInline: true)
+        expect(address.matches.first?.kind == .typedAddress && !address.wantsSuggestions, "Addresses are opened, not sent for suggestions")
+        expect(store.autocomplete("ajus", allowInline: true).matches.contains { $0.destination == .internalPage(.settings) }, "Lume's pages can be found")
+        expect(store.autocomplete("historico", allowInline: true).matches.contains { $0.destination == .internalPage(.library) }, "Lume's pages answer to their words")
+        let typedPage = store.autocomplete("lume://ajustes", allowInline: true).matches
+        expect(typedPage.first?.destination == .internalPage(.settings) && typedPage.filter { $0.kind == .internalPage }.count == 1,
+               "A typed Lume address is one row that opens the page")
+
+        let pageID = store.activeTabID!
+        store.newTab()
+        let tabRow = store.autocomplete("clau", allowInline: true).matches.first { $0.url == "https://github.com/anthropics/claude-code" }
+        expect(tabRow == nil || tabRow?.tabID == nil, "The page behind the active tab is not offered as a tab")
+        store.selectTab(pageID)
+        visit(store, engine, "https://github.com/anthropics/claude-code", title: "Claude Code")
+        store.newTab()
+        let open = store.autocomplete("claude", allowInline: true).matches.first { $0.url == "https://github.com/anthropics/claude-code" }
+        expect(open?.destination == .tab(pageID) && open?.tabID == pageID, "An open page switches to its tab")
+        store.open(.tab(pageID))
+        expect(store.activeTabID == pageID, "Opening the row selects the tab")
+
+        store.open(.search("github.com"))
+        expect(engine.navigated.last?.1.hasPrefix("https://duckduckgo.com/?q=github.com") == true, "A search row searches even for an address")
+        store.removeHistory(url: "https://example.com/cafe")
+        expect(!store.history.contains { $0.url == "https://example.com/cafe" }, "A suggestion can be removed from history")
+        expect(!store.autocomplete("cafe", allowInline: true).matches.contains { $0.url == "https://example.com/cafe" }, "A removed page is no longer suggested")
+        let backup = try JSONDecoder().decode(BrowserLibrary.self, from: Data(contentsOf: directory.appendingPathComponent("library.backup.json")))
+        expect(!backup.history.contains { $0.url == "https://example.com/cafe" }, "The recovery copy forgets it too")
+
+        store.setSearchSuggestions(false)
+        expect(!store.autocomplete("clim", allowInline: true).wantsSuggestions || !store.suggestsSearches, "Suggestions can be turned off")
+        let reopened = BrowserStore(engine: FakeEngine(), dataDirectory: directory)
+        expect(!reopened.settings.searchSuggestions, "The choice survives a restart")
+        reopened.shutdown()
+    }
+
+    private static func testAutocompleteIndex() {
+        let now = Date()
+        let index = AutocompleteIndex()
+        let history = [
+            HistoryEntry(url: "https://www.youtube.com/", title: "YouTube", visitedAt: now, typed: true),
+            HistoryEntry(url: "http://youtube.com/", title: "YouTube", visitedAt: now.addingTimeInterval(-60)),
+            HistoryEntry(url: "https://youtube.com/watch?v=1", title: "Um vídeo", visitedAt: now.addingTimeInterval(-86_400 * 200)),
+            HistoryEntry(url: "https://mail.google.com/mail", title: "Caixa de entrada", visitedAt: now),
+            HistoryEntry(url: "https://mail.google.com/mail", title: "Caixa de entrada", visitedAt: now.addingTimeInterval(-10))
+        ]
+        index.rebuild(history: history, bookmarks: [Bookmark(url: "https://docs.swift.org/", title: "Swift")], searchURL: NavigationController.defaultSearchURL, now: now)
+        let rows = index.complete("youtube", allowInline: true, openTabs: []).matches.filter { $0.detail.hasPrefix("youtube.com") && $0.kind != .typedSearch }
+        expect(rows.filter { $0.detail == "youtube.com" }.count == 1, "http, https, www and the trailing slash are one row")
+        expect(index.complete("tube", allowInline: true, openTabs: []).matches.contains { $0.detail == "youtube.com" }, "Inside a host still matches")
+        expect(index.complete("google", allowInline: true, openTabs: []).matches.contains { $0.detail == "mail.google.com/mail" }, "A host label matches after a dot")
+        expect(index.complete("sw", allowInline: true, openTabs: []).inlineCompletion == "", "Without a matching host start, nothing completes")
+        expect(index.complete("doc", allowInline: true, openTabs: []).inlineCompletion == "s.swift.org", "A favorite completes even before a visit")
+        expect(AutocompleteIndex.weight(age: 86_400) > AutocompleteIndex.weight(age: 86_400 * 40), "Recent visits weigh more")
+        expect(!index.complete("v", allowInline: true, openTabs: []).matches.contains { $0.url?.contains("watch?v=") == true },
+               "A single letter does not match a query parameter or a title word")
+        expect(index.complete("vid", allowInline: true, openTabs: []).matches.contains { $0.url?.contains("watch?v=") == true },
+               "A word does match the title")
+
+        // Typing stays instant with a full history.
+        let hosts = (0..<400).map { "site\($0).example.com" }
+        let large = (0..<5_000).map { number in
+            HistoryEntry(url: "https://\(hosts[number % hosts.count])/pagina/\(number)", title: "Página número \(number) sobre café e programação",
+                         visitedAt: now.addingTimeInterval(-Double(number) * 600), typed: number % 7 == 0 ? true : nil)
+        }
+        let started = Date()
+        let big = AutocompleteIndex()
+        big.rebuild(history: large, bookmarks: [], searchURL: NavigationController.defaultSearchURL, now: now)
+        let built = Date()
+        for text in ["s", "si", "sit", "site1", "site12.ex", "cafe prog", "pagina 49", "numero"] { _ = big.complete(text, allowInline: true, openTabs: []) }
+        let typed = Date()
+        expect(big.complete("site12", allowInline: true, openTabs: []).inlineCompletion == ".example.com", "Large histories still complete")
+        // After one more visit, only the new text is folded again.
+        big.rebuild(history: [HistoryEntry(url: "https://novo.example.com/", title: "Novo")] + large.dropLast(), bookmarks: [], searchURL: NavigationController.defaultSearchURL, now: now)
+        let rebuilt = Date()
+        print(String(format: "Autocomplete over 5000 visits: first build %.1f ms, rebuild after a visit %.1f ms, %.2f ms per keystroke",
+                     built.timeIntervalSince(started) * 1000, rebuilt.timeIntervalSince(typed) * 1000, typed.timeIntervalSince(built) * 1000 / 8))
+    }
+
+    private static func testSearchSuggestions() {
+        let data = Data(#"["swift",["swift","swift ui"," ",""],[],{"google:suggesttype":[]}]"#.utf8)
+        expect(SearchSuggestions.parse(data) == ["swift", "swift ui"], "OpenSearch answers are read and blanks dropped")
+        expect(SearchSuggestions.parse(Data("[]".utf8)) == nil, "An empty answer is ignored")
+        let brazil = Locale(identifier: "pt_BR")
+        expect(SearchSuggestions.endpoint(searchURL: NavigationController.defaultSearchURL, query: "ação & café", locale: brazil)?.absoluteString
+               == "https://duckduckgo.com/ac/?q=a%C3%A7%C3%A3o%20%26%20caf%C3%A9&type=list&kl=br-pt", "The query is encoded for DuckDuckGo, in the Mac's region")
+        expect(SearchSuggestions.endpoint(searchURL: NavigationController.defaultSearchURL, query: "x", locale: Locale(identifier: "en_GB"))?.absoluteString
+               == "https://duckduckgo.com/ac/?q=x&type=list&kl=uk-en", "DuckDuckGo calls the United Kingdom uk")
+        expect(SearchSuggestions.endpoint(searchURL: "https://www.google.com/search?q={query}", query: "x", locale: brazil)?.absoluteString
+               == "https://suggestqueries.google.com/complete/search?client=firefox&ie=UTF-8&oe=UTF-8&hl=pt-BR&q=x", "Google answers in UTF-8 and the Mac's language")
+        expect(SearchSuggestions.endpoint(searchURL: "https://search.example/?q={query}", query: "x") == nil, "Unknown engines are never asked")
+        expect(SearchTemplate(NavigationController.defaultSearchURL)?.query(in: "https://duckduckgo.com/?q=clima+em+s%C3%A3o+paulo&ia=web") == "clima em são paulo",
+               "Result pages read back as their search")
+        expect(SearchTemplate(NavigationController.defaultSearchURL)?.query(in: "https://duckduckgo.com/about") == nil, "Other pages of the engine stay pages")
+        let navigation = NavigationController()
+        expect(navigation.isAddress("github.com") && navigation.isAddress("localhost:3000") && navigation.isAddress("lume://ajustes"), "Addresses read as addresses")
+        expect(!navigation.isAddress("clima hoje") && !navigation.isAddress("swift"), "Words read as searches")
     }
 
     private static func temporaryDirectory() -> URL {
