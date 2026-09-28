@@ -10,12 +10,12 @@
 </p>
 
 <p align="center">
-  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-461401?logo=apple&logoColor=white">
-  <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-461401">
-  <img alt="Swift 5" src="https://img.shields.io/badge/Swift-5-FB8D13?logo=swift&logoColor=white">
-  <img alt="CEF 154" src="https://img.shields.io/badge/CEF-154-FB8D13?logo=googlechrome&logoColor=white">
-  <img alt="Versão 0.2.1" src="https://img.shields.io/badge/vers%C3%A3o-0.2.1-FCE2C2">
-  <img alt="Status experimental" src="https://img.shields.io/badge/status-experimental-FCE2C2">
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-173AD1?logo=apple&logoColor=white&labelColor=173AD1">
+  <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-173AD1?labelColor=173AD1">
+  <img alt="Swift 5" src="https://img.shields.io/badge/Swift-5-7C9CFE?logo=swift&logoColor=white&labelColor=173AD1">
+  <img alt="CEF 154" src="https://img.shields.io/badge/CEF-154-7C9CFE?logo=googlechrome&logoColor=white&labelColor=173AD1">
+  <img alt="Versão 0.2.1" src="https://img.shields.io/badge/vers%C3%A3o-0.2.1-D6C4F9?labelColor=173AD1">
+  <img alt="Status experimental" src="https://img.shields.io/badge/status-experimental-D6C4F9?labelColor=173AD1">
 </p>
 
 <p align="center">
@@ -191,10 +191,12 @@ Validado em um Apple M1 com 8 GB de RAM.
 
 ## Ícone
 
-O ícone é composto no Icon Composer a partir das camadas vetoriais em `resources/AppIcon` e exportado para `Lume.icns`, que o build usa diretamente. Para regenerar depois de alterar a arte:
+A arte original está em [`LOGO-LUME-novo.svg`](LOGO-LUME-novo.svg). O script prepara `resources/AppIcon/logo.svg` em canvas de 1024 pixels e renderiza uma camada transparente `logo.png` de 2048 × 2048 para preservar o gradiente, as máscaras e o desfoque da arte. O Icon Composer importa essa camada e usa o fundo original `#F9FEFD` na composição nativa. O documento editável está em [`resources/AppIcon/Lume.icon`](resources/AppIcon/Lume.icon).
+
+O build usa `resources/AppIcon/Lume.icns` com acabamento estático, também aplicado aos helpers. Para regenerar o ícone e os previews depois de alterar a arte:
 
 ```sh
-python3 scripts/build-icon.py   # requer o Icon Composer da Apple
+python3 scripts/build-icon.py   # requer Icon Composer, Node.js e npm
 python3 scripts/package.py
 ```
 

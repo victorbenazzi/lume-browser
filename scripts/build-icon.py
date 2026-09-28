@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
@@ -23,9 +24,30 @@ assets = root / "resources/AppIcon"
 build = root / ".build/app-icon"
 build.mkdir(parents=True, exist_ok=True)
 document = assets / "Lume.icon"
-# Keep exported layers byte-identical to the editable vector sources.
-for name in ("body.svg", "muzzle.svg", "features.svg"):
-    shutil.copy2(assets / name, document / "Assets" / name)
+# Preserve the supplied mark, gradients and masks. Icon Composer supplies the
+# native background shape instead of rounding an already rounded SVG twice.
+ET.register_namespace("", "http://www.w3.org/2000/svg")
+source = ET.parse(root / "LOGO-LUME-novo.svg").getroot()
+background = next(iter(source))
+if background.tag != "{http://www.w3.org/2000/svg}path" or background.get("fill") != "#F9FEFD":
+    raise SystemExit("Expected the original #F9FEFD background in LOGO-LUME-novo.svg")
+source.remove(background)
+source.set("width", "1024")
+source.set("height", "1024")
+# The original rounded tile occupies about 890 units, centered at (502, 501).
+# Mapping that tile to the native canvas keeps the original optical proportions.
+source.set("viewBox", "57 56 890 890")
+layer = assets / "logo.svg"
+ET.ElementTree(source).write(layer, encoding="utf-8", xml_declaration=True)
+# CoreSVG drops the source's Gaussian blur filters. Render the transparent
+# layer first, then let Icon Composer apply its native material and lighting.
+if shutil.which("npx") is None:
+    raise SystemExit("Install Node.js with npm to render the SVG filters before Icon Composer export.")
+subprocess.run([
+    "npx", "--yes", "sharp-cli@6.1.0", "--input", str(layer),
+    "--output", str(assets / "logo.png"), "--density", "144",
+], check=True)
+shutil.copy2(assets / "logo.png", document / "Assets/logo.png")
 subprocess.run([
     str(ictool), str(document), "--export-image", "--output-file", str(build / "rendered.png"),
     "--platform", "macOS", "--rendition", "Default", "--width", "1024", "--height", "1024", "--scale", "1",
